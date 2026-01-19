@@ -9,6 +9,7 @@ Page, SLUB, KASAN, Folio 서브시스템 분석 및 메모리 corruption 탐지 
 
 - Python 3.10+
 - uv (프로젝트/패키지 매니저)
+- ruff (linter/formatter)
 - ctypes (커널 구조체 접근)
 - DINotebookWrapper (DI 환경 인터페이스)
 
@@ -247,6 +248,22 @@ uv run pytest tests/unit/analyzers/test_slub.py
 
 # Coverage
 uv run pytest --cov=di_memory
+```
+
+### Linting & Formatting
+
+```bash
+# Lint 검사
+uv run ruff check .
+
+# Lint 자동 수정
+uv run ruff check --fix .
+
+# Format 검사
+uv run ruff format --check .
+
+# Format 적용
+uv run ruff format .
 ```
 
 ## 커밋 메시지 규칙
