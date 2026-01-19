@@ -197,3 +197,122 @@ class TestKasanFaultAnalyzerFindNearbyObjects:
         tags = [obj["tag"] for obj in objects]
         # 0x42 -> 0xFE, 0xFE -> 0x43 등의 경계
         assert any(t in tags for t in [0x42, 0x43, 0xFE])
+
+
+# =============================================================================
+# analyze_redzone 테스트
+# =============================================================================
+
+
+class TestKasanFaultAnalyzerRedzone:
+    """analyze_redzone 테스트."""
+
+    def test_analyze_redzone_valid(
+        self, kasan_fault_analyzer, kasan_mock_backend, setup_shadow_tags
+    ):
+        """정상 redzone."""
+        base = setup_shadow_tags["base"]
+        # Object 1 (64 bytes)의 redzone 검사
+        result = kasan_fault_analyzer.analyze_redzone(base, 64)
+
+        assert result["valid"] is True
+        assert result["corruption_type"] is None
+        assert result["corrupted_granules"] == 0
+
+    def test_analyze_redzone_overflow(
+        self, kasan_fault_analyzer, kasan_mock_backend, setup_shadow_tags
+    ):
+        """Redzone overflow 탐지."""
+        base = setup_shadow_tags["base"]
+
+        # Object 끝 뒤에 object 태그가 확장된 경우 (overflow 시뮬레이션)
+        kasan_mock_backend.set_shadow_tag(base + 64, 0x42)  # redzone에 object 태그
+
+        result = kasan_fault_analyzer.analyze_redzone(base, 64)
+
+        assert result["valid"] is False
+        assert result["corruption_type"] == "overflow"
+        assert result["corrupted_granules"] > 0
+
+
+# =============================================================================
+# build_corruption_timeline 테스트
+# =============================================================================
+
+
+class TestKasanFaultAnalyzerTimeline:
+    """build_corruption_timeline 테스트."""
+
+    def test_timeline_freed_memory(
+        self, kasan_fault_analyzer, kasan_mock_backend, setup_shadow_tags
+    ):
+        """Freed 메모리 타임라인."""
+        base = setup_shadow_tags["base"]
+        freed_addr = base + 144
+
+        result = kasan_fault_analyzer.build_corruption_timeline(freed_addr)
+
+        assert result["current_state"] == "freed"
+        assert result["current_tag"] == 0xFE
+        assert "timeline" in result
+
+    def test_timeline_allocated_memory(
+        self, kasan_fault_analyzer, kasan_mock_backend, setup_shadow_tags
+    ):
+        """Allocated 메모리 타임라인."""
+        base = setup_shadow_tags["base"]
+
+        result = kasan_fault_analyzer.build_corruption_timeline(base)
+
+        assert result["current_state"] == "allocated"
+        assert result["current_tag"] == 0x42
+
+
+# =============================================================================
+# detect_spray_corruption 테스트
+# =============================================================================
+
+
+class TestKasanFaultAnalyzerSpray:
+    """detect_spray_corruption 테스트."""
+
+    def test_detect_normal_region(
+        self, kasan_fault_analyzer, kasan_mock_backend, setup_shadow_tags
+    ):
+        """정상 영역 스캔."""
+        base = setup_shadow_tags["base"]
+
+        result = kasan_fault_analyzer.detect_spray_corruption(base, 256)
+
+        assert result["total_granules"] > 0
+        assert "tag_distribution" in result
+        assert "anomalies" in result
+        assert result["corruption_indicators"]["checked"] is True
+
+    def test_detect_mass_free(self, kasan_fault_analyzer, kasan_mock_backend):
+        """대량 해제 탐지."""
+        base = 0xFFFF_8882_0000_0000
+
+        # 256 bytes (16 granules)의 연속된 freed 영역
+        kasan_mock_backend.set_shadow_tags_range(base, 256, 0xFE)
+
+        result = kasan_fault_analyzer.detect_spray_corruption(base, 256)
+
+        # Mass free anomaly 탐지
+        assert result["corruption_indicators"]["has_mass_free"] is True
+        mass_free = [a for a in result["anomalies"] if a["type"] == "mass_free"]
+        assert len(mass_free) > 0
+
+    def test_detect_heap_spray(self, kasan_fault_analyzer, kasan_mock_backend):
+        """Heap spray 패턴 탐지."""
+        base = 0xFFFF_8883_0000_0000
+
+        # 동일 태그로 채워진 영역 (90% 이상)
+        kasan_mock_backend.set_shadow_tags_range(base, 512, 0x42)
+
+        result = kasan_fault_analyzer.detect_spray_corruption(base, 512)
+
+        # Heap spray anomaly 탐지
+        assert result["corruption_indicators"]["has_heap_spray"] is True
+        spray = [a for a in result["anomalies"] if a["type"] == "heap_spray"]
+        assert len(spray) > 0
