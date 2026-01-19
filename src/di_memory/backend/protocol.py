@@ -85,7 +85,9 @@ class DIBackend(Protocol):
             struct인 경우 ctypes.Structure, 기본 타입인 경우 int
 
         Note:
-            struct 반환 시 ._base 속성에 원본 주소가 저장됨.
+            struct 반환 시 다음 속성이 설정됨:
+            - ._base: 원본 주소 (int)
+            - ._struct: 타입 이름 (str)
         """
         ...
 

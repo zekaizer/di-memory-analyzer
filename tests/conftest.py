@@ -145,10 +145,12 @@ class MockDIBackend:
             if original_addr in self._pages:
                 page = self._pages[original_addr]
                 page._base = original_addr
+                page._struct = type_name
                 return page
             # 새 페이지 생성
             page = MockPage()
             page._base = original_addr
+            page._struct = type_name
             self._pages[original_addr] = page
             return page
 
