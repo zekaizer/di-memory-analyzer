@@ -35,7 +35,6 @@ class SlubAnalyzer(BaseAnalyzer):
             symbols: KernelResolver 인스턴스
         """
         super().__init__(backend, structs, addr, symbols)
-        self._slab_type: str | None = None
 
     # =========================================================================
     # Properties
@@ -118,34 +117,19 @@ class SlubAnalyzer(BaseAnalyzer):
     # Slab 조회/순회
     # =========================================================================
 
-    def _get_slab_type(self) -> str:
-        """
-        slab 구조체 타입명 반환.
-
-        Linux 6.1+에서는 struct slab, 이전에는 struct page 사용.
-        """
-        if self._slab_type is None:
-            if self._backend.has_member("struct slab", "slab_cache"):
-                self._slab_type = "struct slab"
-            else:
-                self._slab_type = "struct page"
-        return self._slab_type
-
     def get_slab(self, page: ctypes.Structure) -> ctypes.Structure:
         """
         Page에서 slab 구조체 조회.
+
+        Linux 6.12+에서 struct page와 struct slab은 동일 주소.
 
         Args:
             page: struct page
 
         Returns:
-            struct slab (또는 struct page, 커널 버전에 따라)
+            struct slab
         """
-        slab_type = self._get_slab_type()
-        if slab_type == "struct slab":
-            # Linux 6.1+: page 주소와 slab 주소가 동일
-            return self._structs.read(page._base, "struct slab")
-        return page
+        return self._structs.read(page._base, "struct slab")
 
     def _get_slab_cache(self, slab: ctypes.Structure) -> ctypes.Structure:
         """Slab이 속한 kmem_cache 반환."""
@@ -193,9 +177,8 @@ class SlubAnalyzer(BaseAnalyzer):
         partial_offset = self._backend.offsetof("struct kmem_cache_node", "partial")
         partial_head = node._base + partial_offset
 
-        slab_type = self._get_slab_type()
         yield from self._structs.list_for_each_entry(
-            partial_head, slab_type, "slab_list"
+            partial_head, "struct slab", "slab_list"
         )
 
     def iter_slabs(self, cache: ctypes.Structure) -> Iterator[ctypes.Structure]:
@@ -235,7 +218,7 @@ class SlubAnalyzer(BaseAnalyzer):
 
         slab_addr = cpu_slab.slab
         if slab_addr != 0:
-            slab = self._structs.read(slab_addr, self._get_slab_type())
+            slab = self._structs.read(slab_addr, "struct slab")
             yield (0, slab)
         else:
             yield (0, None)
@@ -280,7 +263,7 @@ class SlubAnalyzer(BaseAnalyzer):
         fp_offset = cache.offset
 
         # freelist 시작
-        freelist_offset = self._backend.offsetof(self._get_slab_type(), "freelist")
+        freelist_offset = self._backend.offsetof("struct slab", "freelist")
         ptr_addr = slab._base + freelist_offset
         current = slab.freelist
 
@@ -437,7 +420,7 @@ class SlubAnalyzer(BaseAnalyzer):
         cache = self._get_slab_cache(slab)
         fp_offset = cache.offset
 
-        freelist_offset = self._backend.offsetof(self._get_slab_type(), "freelist")
+        freelist_offset = self._backend.offsetof("struct slab", "freelist")
         ptr_addr = slab._base + freelist_offset
         current = slab.freelist
 
