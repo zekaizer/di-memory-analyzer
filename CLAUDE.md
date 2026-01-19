@@ -107,28 +107,7 @@ def _read_struct(self, addr, name):
 
 ### 타입 힌트
 
-```python
-# 필수: 모든 public 메서드에 타입 힌트
-def get_cache(self, name: str) -> ctypes.Structure | None:
-def iter_caches(self) -> Iterator[ctypes.Structure]:
-def find_owning_cache(self, addr: int) -> tuple | None:
-
-# Optional은 | None 사용 (Optional[X] 대신 X | None)
-def symbol_to_addr(self, name: str) -> int | None:
-
-# Union은 | 사용 (Union[X, Y] 대신 X | Y)
-def is_config_enabled(self, name: str) -> bool | int | str | None:
-
-# 유연한 입력: int | str (주소 또는 심볼 이름)
-def read_u64(self, addr: int | str) -> int:
-
-# tuple 반환 시 구체적 타입 명시
-def addr_to_symbol(self, addr: int) -> tuple[str, int] | None:
-
-# Generic 타입은 소문자 내장 타입 사용 (List 대신 list)
-def decode_flags(self, flags: int) -> list[str]:
-cache: dict[str, int] = {}
-```
+- 모든 public 메서드에 타입 힌트 필수
 
 ### Docstring
 
