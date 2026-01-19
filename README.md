@@ -13,12 +13,17 @@ A memory analysis module for analyzing Linux kernel RAMDUMP in DI Notebook envir
 ## Requirements
 
 - Python 3.10+
+- [uv](https://docs.astral.sh/uv/) (package manager)
 - DI Notebook environment with DINotebookWrapper
 
 ## Installation
 
 ```bash
-pip install -e .
+# Install uv (if not installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies
+uv sync
 ```
 
 ## Quick Start
@@ -57,10 +62,10 @@ src/di_memory/
 ## Testing
 
 ```bash
-pytest
-pytest --cov=di_memory
+uv run pytest
+uv run pytest --cov=di_memory
 ```
 
 ## License
 
-Internal use only.
+MIT License - see [LICENSE](LICENSE) for details.
