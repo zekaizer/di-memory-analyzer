@@ -217,6 +217,31 @@ class DIBackend(Protocol):
     # Kernel Config
     # =========================================================================
 
+    def get_enum(self, enum_name: str) -> dict[str, int] | None:
+        """
+        Enum 전체를 dict로 반환.
+
+        Args:
+            enum_name: enum 타입 이름 (예: "pageflags", "zone_type")
+
+        Returns:
+            {member_name: value} dict 또는 None (enum이 없는 경우)
+        """
+        ...
+
+    def get_enum_value(self, enum_name: str, member: str) -> int | None:
+        """
+        Enum 특정 멤버의 값 조회.
+
+        Args:
+            enum_name: enum 타입 이름
+            member: 멤버 이름 (예: "PG_slab", "ZONE_NORMAL")
+
+        Returns:
+            멤버 값 또는 None (없는 경우)
+        """
+        ...
+
     def get_config(self, config_name: str) -> bool | int | str | None:
         """
         커널 config 값 조회.

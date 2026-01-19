@@ -77,6 +77,25 @@ class AddressTranslator:
         return self.pfn_to_page(pfn)
 
     # =========================================================================
+    # Page 관련 상수 (Properties)
+    # =========================================================================
+
+    @property
+    def page_shift(self) -> int:
+        """PAGE_SHIFT (CONFIG_PAGE_SHIFT, 기본값 12)."""
+        return self._get_page_shift()
+
+    @property
+    def page_size(self) -> int:
+        """PAGE_SIZE (1 << PAGE_SHIFT)."""
+        return 1 << self.page_shift
+
+    @property
+    def page_mask(self) -> int:
+        """PAGE_MASK (~(PAGE_SIZE - 1))."""
+        return ~(self.page_size - 1)
+
+    # =========================================================================
     # 유효성 검사
     # =========================================================================
 

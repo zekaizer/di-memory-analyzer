@@ -13,6 +13,7 @@ class KernelResolver:
 
     def __init__(self, backend: DIBackend) -> None:
         self._backend = backend
+        self._enum_cache: dict[str, dict[str, int]] = {}
 
     # =========================================================================
     # Symbol
@@ -96,3 +97,36 @@ class KernelResolver:
         if isinstance(value, str):
             return value.lower() in ("y", "m")
         return False
+
+    # =========================================================================
+    # Enum
+    # =========================================================================
+
+    def get_enum(self, enum_name: str) -> dict[str, int] | None:
+        """
+        Enum 전체를 dict로 반환 (캐싱).
+
+        Args:
+            enum_name: enum 타입 이름 (예: "pageflags", "zone_type")
+
+        Returns:
+            {member_name: value} dict 또는 None
+        """
+        if enum_name not in self._enum_cache:
+            result = self._backend.get_enum(enum_name)
+            if result is not None:
+                self._enum_cache[enum_name] = result
+        return self._enum_cache.get(enum_name)
+
+    def get_enum_value(self, enum_name: str, member: str) -> int | None:
+        """
+        Enum 특정 멤버의 값 조회.
+
+        Args:
+            enum_name: enum 타입 이름
+            member: 멤버 이름 (예: "PG_slab")
+
+        Returns:
+            멤버 값 또는 None
+        """
+        return self._backend.get_enum_value(enum_name, member)
