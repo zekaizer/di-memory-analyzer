@@ -51,6 +51,7 @@ class MockKmemCache(ctypes.Structure):
         ("size", ctypes.c_uint),  # object size with padding
         ("object_size", ctypes.c_uint),  # actual object size
         ("offset", ctypes.c_uint),  # freelist pointer offset
+        ("inuse", ctypes.c_uint),  # size actually used by object (for tracking offset)
         ("oo", ctypes.c_uint),  # objects per slab (packed)
         ("flags", ctypes.c_ulong),  # slab flags
         ("random", ctypes.c_ulong),  # FREELIST_HARDENED random value
@@ -95,6 +96,30 @@ class MockKmemCacheNode(ctypes.Structure):
     ]
 
 
+class MockTrack(ctypes.Structure):
+    """Mock struct track (CONFIG_SLUB_DEBUG tracking)."""
+
+    _fields_ = [
+        ("addr", ctypes.c_ulong),  # Called from address
+        ("handle", ctypes.c_uint),  # Stack depot handle (CONFIG_STACKDEPOT)
+        ("cpu", ctypes.c_int),  # CPU that performed operation
+        ("pid", ctypes.c_int),  # PID of process
+        ("when", ctypes.c_ulong),  # jiffies timestamp
+    ]
+
+
+class MockStackRecord(ctypes.Structure):
+    """Mock struct stack_record (stack depot)."""
+
+    _fields_ = [
+        ("hash_list_next", ctypes.c_ulong),  # list_head.next
+        ("hash_list_prev", ctypes.c_ulong),  # list_head.prev
+        ("hash", ctypes.c_uint),  # stack hash
+        ("size", ctypes.c_uint),  # number of frames
+        # entries[] is variable-length, handled separately
+    ]
+
+
 # =============================================================================
 # Mock Backend
 # =============================================================================
@@ -116,6 +141,9 @@ class MockDIBackend:
         self._cache_cpus: dict[int, MockKmemCacheCpu] = {}
         self._cache_nodes: dict[int, MockKmemCacheNode] = {}
         self._strings: dict[int, str] = {}  # 문자열 저장
+        # Tracking
+        self._tracks: dict[int, MockTrack] = {}
+        self._stack_depot: dict[int, list[int]] = {}  # handle -> [addrs]
 
         # 기본 설정
         self._setup_defaults()
@@ -148,6 +176,15 @@ class MockDIBackend:
             "PG_buddy": 26,
         }
 
+        # slabflags enum 설정 (SLAB 플래그)
+        self._enums["slabflags"] = {
+            "SLAB_CONSISTENCY_CHECKS": 0x00000100,
+            "SLAB_RED_ZONE": 0x00000400,
+            "SLAB_POISON": 0x00000800,
+            "SLAB_STORE_USER": 0x00010000,
+            "SLAB_TRACE": 0x00200000,
+        }
+
         # struct page 등록
         self._structs["struct page"] = (
             ctypes.sizeof(MockPage),
@@ -167,7 +204,7 @@ class MockDIBackend:
         )
 
         # struct kmem_cache 등록 (Linux 6.12+)
-        # 필드 오프셋은 _fields_ 순서에 따라 자동 계산
+        # 필드 오프셋은 _fields_ 순서에 따라 계산
         self._structs["struct kmem_cache"] = (
             ctypes.sizeof(MockKmemCache),
             {
@@ -175,12 +212,13 @@ class MockDIBackend:
                 "size": 8,
                 "object_size": 12,
                 "offset": 16,
-                "oo": 20,
-                "flags": 24,
-                "random": 32,
-                "list": 40,  # MockListHead는 16바이트
-                "cpu_slab": 56,
-                "node": 64,
+                "inuse": 20,  # for tracking offset calculation
+                "oo": 24,
+                "flags": 32,  # 8-byte aligned
+                "random": 40,
+                "list": 48,  # MockListHead는 16바이트
+                "cpu_slab": 64,
+                "node": 72,
             },
         )
 
@@ -219,9 +257,33 @@ class MockDIBackend:
             },
         )
 
+        # struct track 등록 (CONFIG_SLUB_DEBUG)
+        self._structs["struct track"] = (
+            ctypes.sizeof(MockTrack),
+            {
+                "addr": 0,
+                "handle": 8,  # CONFIG_STACKDEPOT
+                "cpu": 12,
+                "pid": 16,
+                "when": 24,
+            },
+        )
+
+        # struct stack_record 등록 (stack depot)
+        self._structs["struct stack_record"] = (
+            ctypes.sizeof(MockStackRecord),
+            {
+                "hash_list": 0,  # struct list_head (16 bytes)
+                "hash": 16,
+                "size": 20,
+                "entries": 24,  # variable-length array starts here
+            },
+        )
+
         # SLUB 관련 CONFIG
         self._configs["CONFIG_SLUB_DEBUG"] = True
         self._configs["CONFIG_SLAB_FREELIST_HARDENED"] = True
+        self._configs["CONFIG_STACKDEPOT"] = True
 
         # 기본 심볼
         self._symbols["vmemmap"] = 0xFFFF_EA00_0000_0000
@@ -343,6 +405,19 @@ class MockDIBackend:
             node._struct = type_name
             self._cache_nodes[original_addr] = node
             return node
+
+        if type_name == "struct track":
+            if original_addr in self._tracks:
+                track = self._tracks[original_addr]
+                track._base = original_addr
+                track._struct = type_name
+                return track
+            # 새 track 생성 (빈 tracking)
+            track = MockTrack()
+            track._base = original_addr
+            track._struct = type_name
+            self._tracks[original_addr] = track
+            return track
 
         return 0
 
@@ -486,6 +561,7 @@ class MockDIBackend:
         object_size: int,
         size: int | None = None,
         offset: int = 0,
+        inuse: int | None = None,
         random: int = 0,
         flags: int = 0,
     ) -> MockKmemCache:
@@ -498,11 +574,14 @@ class MockDIBackend:
             object_size: 실제 object 크기
             size: 패딩 포함 크기 (기본: object_size)
             offset: freelist pointer offset
+            inuse: tracking 오프셋용 (기본: object_size)
             random: FREELIST_HARDENED random 값
             flags: slab flags
         """
         if size is None:
             size = object_size
+        if inuse is None:
+            inuse = object_size
 
         cache = MockKmemCache()
         # name 문자열 저장 (별도 주소에)
@@ -512,6 +591,7 @@ class MockDIBackend:
         cache.object_size = object_size
         cache.size = size
         cache.offset = offset
+        cache.inuse = inuse
         cache.random = random
         cache.flags = flags
         # list는 나중에 연결
@@ -645,6 +725,81 @@ class MockDIBackend:
                 encoded = encode_ptr(0, fp_addr)  # 마지막은 NULL
 
             self._memory[fp_addr] = encoded.to_bytes(8, "little")
+
+    # =========================================================================
+    # Tracking 테스트 헬퍼
+    # =========================================================================
+
+    def register_object_track(
+        self,
+        obj_addr: int,
+        cache: MockKmemCache,
+        alloc_track: dict | None = None,
+        free_track: dict | None = None,
+    ) -> None:
+        """
+        Object의 tracking 정보 설정.
+
+        Args:
+            obj_addr: object 시작 주소
+            cache: kmem_cache (inuse, flags 필요)
+            alloc_track: {"addr": int, "handle": int, "cpu": int, "pid": int, "when": int}
+            free_track: 동일 형식
+        """
+        # Track 오프셋 계산 (SLAB_RED_ZONE이면 inuse + 8, 아니면 inuse)
+        slab_red_zone = self._enums["slabflags"]["SLAB_RED_ZONE"]
+        info_end = cache.inuse + 8 if cache.flags & slab_red_zone else cache.inuse
+
+        track_size = ctypes.sizeof(MockTrack)
+
+        # alloc_track (TRACK_ALLOC = 0)
+        if alloc_track:
+            alloc_addr = obj_addr + info_end
+            track = MockTrack()
+            track.addr = alloc_track.get("addr", 0)
+            track.handle = alloc_track.get("handle", 0)
+            track.cpu = alloc_track.get("cpu", 0)
+            track.pid = alloc_track.get("pid", 0)
+            track.when = alloc_track.get("when", 0)
+            self._tracks[alloc_addr] = track
+
+        # free_track (TRACK_FREE = 1)
+        if free_track:
+            free_addr = obj_addr + info_end + track_size
+            track = MockTrack()
+            track.addr = free_track.get("addr", 0)
+            track.handle = free_track.get("handle", 0)
+            track.cpu = free_track.get("cpu", 0)
+            track.pid = free_track.get("pid", 0)
+            track.when = free_track.get("when", 0)
+            self._tracks[free_addr] = track
+
+    def register_stack_depot_entry(
+        self,
+        handle: int,
+        stack_addrs: list[int],
+    ) -> None:
+        """
+        Stack depot 엔트리 등록.
+
+        Args:
+            handle: depot_stack_handle_t
+            stack_addrs: 스택 주소 목록
+        """
+        self._stack_depot[handle] = stack_addrs
+
+    def register_symbol_addr(self, addr: int, name: str, offset: int = 0) -> None:
+        """
+        주소에 대한 심볼 정보 등록 (addr_to_symbol용).
+
+        Args:
+            addr: 주소
+            name: 심볼 이름
+            offset: 오프셋 (기본 0)
+        """
+        if not hasattr(self, "_addr_to_symbol"):
+            self._addr_to_symbol: dict[int, tuple[str, int]] = {}
+        self._addr_to_symbol[addr] = (name, offset)
 
 
 # =============================================================================

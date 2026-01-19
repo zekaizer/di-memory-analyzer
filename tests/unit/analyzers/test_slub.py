@@ -264,3 +264,158 @@ class TestSlubAnalyzerLookup:
         result = slub_analyzer.find_owning_cache(vaddr)
 
         assert result is None
+
+
+# =============================================================================
+# Tracking 테스트
+# =============================================================================
+
+
+@pytest.fixture
+def setup_tracking_cache(mock_backend: MockDIBackend):
+    """Tracking이 활성화된 cache 설정."""
+    # SLAB_STORE_USER 플래그 설정
+    slab_store_user = mock_backend._enums["slabflags"]["SLAB_STORE_USER"]
+
+    cache = mock_backend.register_kmem_cache(
+        addr=0xFFFF_8880_0004_0000,
+        name="tracked-cache",
+        object_size=64,
+        size=128,  # 패딩 포함
+        offset=32,
+        inuse=64,  # tracking 오프셋 계산용
+        random=0xABCD_1234_5678_EF00,
+        flags=slab_store_user,
+    )
+
+    mock_backend.link_caches([0xFFFF_8880_0004_0000])
+
+    return cache
+
+
+class TestSlubAnalyzerTracking:
+    """Tracking 관련 테스트."""
+
+    def test_is_tracking_enabled_true(self, slub_analyzer, setup_tracking_cache):
+        """Tracking 활성화된 cache 확인."""
+        cache = slub_analyzer.get_cache("tracked-cache")
+        assert cache is not None
+        assert slub_analyzer.is_tracking_enabled(cache) is True
+
+    def test_is_tracking_enabled_false(self, slub_analyzer, setup_basic_caches):
+        """Tracking 비활성화된 cache 확인."""
+        # setup_basic_caches는 SLAB_STORE_USER 없음
+        cache = slub_analyzer.get_cache("kmalloc-128")
+        assert cache is not None
+        assert slub_analyzer.is_tracking_enabled(cache) is False
+
+    def test_get_alloc_track_disabled(self, slub_analyzer, setup_basic_caches):
+        """Tracking 비활성화 시 None 반환."""
+        cache = slub_analyzer.get_cache("kmalloc-128")
+        result = slub_analyzer.get_alloc_track(cache, 0x1000)
+        assert result is None
+
+    def test_get_free_track_disabled(self, slub_analyzer, setup_basic_caches):
+        """Tracking 비활성화 시 None 반환."""
+        cache = slub_analyzer.get_cache("kmalloc-128")
+        result = slub_analyzer.get_free_track(cache, 0x1000)
+        assert result is None
+
+    def test_get_alloc_track(self, slub_analyzer, mock_backend, setup_tracking_cache):
+        """할당 track 읽기."""
+        cache = setup_tracking_cache
+        cache._base = 0xFFFF_8880_0004_0000
+        obj_addr = 0xFFFF_8880_2000_0000
+
+        # alloc track 등록
+        mock_backend.register_object_track(
+            obj_addr=obj_addr,
+            cache=cache,
+            alloc_track={
+                "addr": 0xFFFF_FFFF_8000_1234,
+                "handle": 0x12345,
+                "cpu": 2,
+                "pid": 1234,
+                "when": 1000000,
+            },
+        )
+
+        result = slub_analyzer.get_alloc_track(cache, obj_addr)
+
+        assert result is not None
+        assert result["addr"] == 0xFFFF_FFFF_8000_1234
+        assert result["handle"] == 0x12345
+        assert result["cpu"] == 2
+        assert result["pid"] == 1234
+        assert result["when"] == 1000000
+
+    def test_get_free_track(self, slub_analyzer, mock_backend, setup_tracking_cache):
+        """해제 track 읽기."""
+        cache = setup_tracking_cache
+        cache._base = 0xFFFF_8880_0004_0000
+        obj_addr = 0xFFFF_8880_2000_0000
+
+        # free track 등록
+        mock_backend.register_object_track(
+            obj_addr=obj_addr,
+            cache=cache,
+            free_track={
+                "addr": 0xFFFF_FFFF_8000_5678,
+                "handle": 0x67890,
+                "cpu": 3,
+                "pid": 5678,
+                "when": 2000000,
+            },
+        )
+
+        result = slub_analyzer.get_free_track(cache, obj_addr)
+
+        assert result is not None
+        assert result["addr"] == 0xFFFF_FFFF_8000_5678
+        assert result["handle"] == 0x67890
+        assert result["cpu"] == 3
+        assert result["pid"] == 5678
+        assert result["when"] == 2000000
+
+    def test_get_object_tracks(self, slub_analyzer, mock_backend, setup_tracking_cache):
+        """alloc/free track 모두 읽기."""
+        cache = setup_tracking_cache
+        cache._base = 0xFFFF_8880_0004_0000
+        obj_addr = 0xFFFF_8880_2000_0100
+
+        # 둘 다 등록
+        mock_backend.register_object_track(
+            obj_addr=obj_addr,
+            cache=cache,
+            alloc_track={"addr": 0x1000, "handle": 0, "cpu": 0, "pid": 100, "when": 1},
+            free_track={"addr": 0x2000, "handle": 0, "cpu": 1, "pid": 200, "when": 2},
+        )
+
+        result = slub_analyzer.get_object_tracks(cache, obj_addr)
+
+        assert result["tracking_enabled"] is True
+        assert result["alloc"] is not None
+        assert result["alloc"]["pid"] == 100
+        assert result["free"] is not None
+        assert result["free"]["pid"] == 200
+
+    def test_has_stackdepot(self, slub_analyzer, mock_backend):
+        """CONFIG_STACKDEPOT 확인."""
+        # 기본적으로 True로 설정됨
+        assert slub_analyzer.has_stackdepot is True
+
+        # False로 변경
+        mock_backend._configs["CONFIG_STACKDEPOT"] = False
+        assert slub_analyzer.has_stackdepot is False
+
+    def test_slab_flag_methods(self, slub_analyzer, mock_backend, setup_tracking_cache):
+        """SLAB flag 메서드 테스트."""
+        cache = setup_tracking_cache
+
+        # SLAB_STORE_USER 확인
+        assert slub_analyzer._test_slab_flag(cache, "SLAB_STORE_USER") is True
+        assert slub_analyzer._test_slab_flag(cache, "SLAB_RED_ZONE") is False
+
+        # 플래그 값 확인
+        flag_value = slub_analyzer._get_slab_flag("SLAB_STORE_USER")
+        assert flag_value == 0x00010000

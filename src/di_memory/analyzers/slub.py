@@ -53,6 +53,33 @@ class SlubAnalyzer(BaseAnalyzer):
         """CONFIG_SLAB_FREELIST_HARDENED 활성화 여부."""
         return self._symbols.is_config_enabled("CONFIG_SLAB_FREELIST_HARDENED")
 
+    @property
+    def has_stackdepot(self) -> bool:
+        """CONFIG_STACKDEPOT 활성화 여부."""
+        return self._symbols.is_config_enabled("CONFIG_STACKDEPOT")
+
+    # =========================================================================
+    # SLAB Flags
+    # =========================================================================
+
+    def _get_slab_flag(self, flag_name: str) -> int:
+        """
+        SLAB 플래그 값 조회 (캐시됨).
+
+        Args:
+            flag_name: 플래그 이름 (예: "SLAB_STORE_USER", "SLAB_RED_ZONE")
+
+        Returns:
+            플래그 값 또는 0
+        """
+        value = self._symbols.get_enum_value("slabflags", flag_name)
+        return value if value is not None else 0
+
+    def _test_slab_flag(self, cache: ctypes.Structure, flag_name: str) -> bool:
+        """Cache에 특정 SLAB 플래그가 설정되어 있는지 확인."""
+        flag = self._get_slab_flag(flag_name)
+        return bool(cache.flags & flag) if flag else False
+
     # =========================================================================
     # Cache 조회/순회
     # =========================================================================
@@ -508,25 +535,187 @@ class SlubAnalyzer(BaseAnalyzer):
             "random": cache.random if self.is_hardened else None,
         }
 
-    def get_slab_info(self, slab: ctypes.Structure, validate: bool = False) -> dict:
+    def get_slab_info(self, slab: ctypes.Structure) -> dict:
         """
         Slab 기본 정보.
 
         Args:
             slab: struct slab
-            validate: freelist 검증 수행 여부 (기본 False, 성능 고려)
 
         Returns:
             slab 정보 dict
         """
-        info = {
+        return {
             "address": slab._base,
             "virt_addr": self.slab_to_virt(slab),
             "objects": slab.objects,
             "inuse": slab.inuse,
             "frozen": bool(slab.frozen),
         }
-        if validate:
-            validation = self.validate_freelist(slab)
-            info["freelist_valid"] = validation["valid"]
-        return info
+
+    # =========================================================================
+    # Tracking (CONFIG_SLUB_DEBUG)
+    # =========================================================================
+
+    def is_tracking_enabled(self, cache: ctypes.Structure) -> bool:
+        """
+        Cache에 tracking 활성화 여부.
+
+        SLAB_STORE_USER 플래그 확인.
+
+        Args:
+            cache: struct kmem_cache
+
+        Returns:
+            tracking 활성화 여부
+        """
+        return self._test_slab_flag(cache, "SLAB_STORE_USER")
+
+    def _get_info_end(self, cache: ctypes.Structure) -> int:
+        """
+        Object 내 metadata 시작 오프셋.
+
+        SLAB_RED_ZONE이면 inuse + sizeof(void*), 아니면 inuse.
+        """
+        if self._test_slab_flag(cache, "SLAB_RED_ZONE"):
+            return cache.inuse + 8  # sizeof(void*) for redzone
+        return cache.inuse
+
+    def _get_track_size(self) -> int:
+        """struct track 크기."""
+        return self._backend.sizeof("struct track")
+
+    def _get_track_offset(self, cache: ctypes.Structure, track_item: int) -> int:
+        """
+        Object 내 track 구조체 오프셋.
+
+        Args:
+            cache: kmem_cache
+            track_item: 0=TRACK_ALLOC, 1=TRACK_FREE
+
+        Returns:
+            track 오프셋
+        """
+        info_end = self._get_info_end(cache)
+        track_size = self._get_track_size()
+        return info_end + track_item * track_size
+
+    def get_alloc_track(
+        self, cache: ctypes.Structure, obj_addr: int
+    ) -> dict | None:
+        """
+        Object의 할당 추적 정보.
+
+        Args:
+            cache: struct kmem_cache
+            obj_addr: object 시작 주소
+
+        Returns:
+            {
+                "addr": int,        # 호출 주소
+                "handle": int,      # stack depot handle
+                "cpu": int,         # 할당 CPU
+                "pid": int,         # 할당 PID
+                "when": int,        # jiffies 타임스탬프
+                "stack": list[str], # resolved 스택 트레이스
+            } 또는 None (tracking 미활성화)
+        """
+        if not self.is_tracking_enabled(cache):
+            return None
+        return self._read_track(cache, obj_addr, 0)  # TRACK_ALLOC
+
+    def get_free_track(
+        self, cache: ctypes.Structure, obj_addr: int
+    ) -> dict | None:
+        """
+        Object의 해제 추적 정보.
+
+        반환 형식은 get_alloc_track과 동일.
+        free된 적 없으면 addr/handle이 0.
+
+        Args:
+            cache: struct kmem_cache
+            obj_addr: object 시작 주소
+
+        Returns:
+            track 정보 dict 또는 None
+        """
+        if not self.is_tracking_enabled(cache):
+            return None
+        return self._read_track(cache, obj_addr, 1)  # TRACK_FREE
+
+    def get_object_tracks(
+        self, cache: ctypes.Structure, obj_addr: int
+    ) -> dict:
+        """
+        Object의 alloc/free 추적 정보 모두 반환.
+
+        Args:
+            cache: struct kmem_cache
+            obj_addr: object 시작 주소
+
+        Returns:
+            {
+                "tracking_enabled": bool,
+                "alloc": dict | None,
+                "free": dict | None,
+            }
+        """
+        return {
+            "tracking_enabled": self.is_tracking_enabled(cache),
+            "alloc": self.get_alloc_track(cache, obj_addr),
+            "free": self.get_free_track(cache, obj_addr),
+        }
+
+    def _read_track(
+        self, cache: ctypes.Structure, obj_addr: int, track_item: int
+    ) -> dict:
+        """
+        Track 구조체 읽기 및 스택 resolve.
+
+        Args:
+            cache: kmem_cache
+            obj_addr: object 주소
+            track_item: 0=TRACK_ALLOC, 1=TRACK_FREE
+
+        Returns:
+            track 정보 dict
+        """
+        offset = self._get_track_offset(cache, track_item)
+        track_addr = obj_addr + offset
+        track = self._structs.read(track_addr, "struct track")
+
+        # 스택 resolve
+        stack: list[str] = []
+        handle = getattr(track, "handle", 0)
+        if self.has_stackdepot and handle:
+            stack = self._resolve_stack_depot(handle)
+        elif track.addr:
+            # 단일 주소만 있는 경우
+            symbol = self._symbols.to_symbol(track.addr)
+            if symbol:
+                name, sym_offset = symbol
+                stack = [f"{name}+{hex(sym_offset)}"]
+
+        return {
+            "addr": track.addr,
+            "handle": handle,
+            "cpu": track.cpu,
+            "pid": track.pid,
+            "when": track.when,
+            "stack": stack,
+        }
+
+    def _resolve_stack_depot(self, handle: int) -> list[str]:
+        """
+        Stack depot 핸들에서 스택 resolve.
+
+        Args:
+            handle: depot_stack_handle_t
+
+        Returns:
+            resolved 스택 문자열 리스트
+        """
+        # StackDepotResolver는 나중에 구현 예정
+        # 현재는 빈 리스트 반환
+        return []
