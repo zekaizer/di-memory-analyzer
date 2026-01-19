@@ -804,6 +804,70 @@ class MockDIBackend:
             self._addr_to_symbol: dict[int, tuple[str, int]] = {}
         self._addr_to_symbol[addr] = (name, offset)
 
+    # =========================================================================
+    # KASAN 테스트 헬퍼
+    # =========================================================================
+
+    def setup_kasan_sw_tags(self, shadow_offset: int = 0xDFFF_FC00_0000_0000) -> None:
+        """
+        KASAN SW_TAGS 모드 설정.
+
+        Args:
+            shadow_offset: kasan_shadow_offset 값
+        """
+        # CONFIG 설정
+        self._configs["CONFIG_KASAN"] = True
+        self._configs["CONFIG_KASAN_SW_TAGS"] = True
+        self._configs["CONFIG_ARM64"] = True
+
+        # shadow offset 심볼 등록
+        shadow_offset_addr = 0xFFFF_FFFF_8300_0000
+        self._symbols["kasan_shadow_offset"] = shadow_offset_addr
+        self._memory[shadow_offset_addr] = shadow_offset.to_bytes(8, "little")
+
+        # shadow memory 저장소 초기화
+        if not hasattr(self, "_shadow_memory"):
+            self._shadow_memory: dict[int, int] = {}
+        self._kasan_shadow_offset = shadow_offset
+
+    def set_shadow_tag(self, addr: int, tag: int) -> None:
+        """
+        주소의 shadow 태그 설정.
+
+        Args:
+            addr: 메모리 주소 (16바이트 granule 정렬됨)
+            tag: 태그 값 (0x00-0xFF)
+        """
+        if not hasattr(self, "_shadow_memory"):
+            self._shadow_memory = {}
+        # 태그 제거 후 shadow 주소 계산
+        untagged = addr | (0xFF << 56)  # reset_tag
+        shadow_addr = (untagged >> 4) + getattr(
+            self, "_kasan_shadow_offset", 0xDFFF_FC00_0000_0000
+        )
+        self._shadow_memory[shadow_addr] = tag
+        # 메모리에도 저장 (read_u8용)
+        self._memory[shadow_addr] = bytes([tag])
+
+    def set_shadow_tags_range(
+        self, start: int, size: int, tag: int, granule_size: int = 16
+    ) -> None:
+        """
+        범위의 shadow 태그 설정.
+
+        Args:
+            start: 시작 주소
+            size: 크기 (bytes)
+            tag: 태그 값
+            granule_size: granule 크기 (기본 16)
+        """
+        untagged = start | (0xFF << 56)
+        aligned_start = untagged & ~(granule_size - 1)
+        aligned_end = (untagged + size + granule_size - 1) & ~(granule_size - 1)
+
+        for addr in range(aligned_start, aligned_end, granule_size):
+            self.set_shadow_tag(addr, tag)
+
 
 # =============================================================================
 # Fixtures
@@ -881,4 +945,37 @@ def slub_analyzer(
         structs=struct_helper,
         addr=address_translator,
         symbols=kernel_resolver,
+    )
+
+
+@pytest.fixture
+def kasan_mock_backend() -> MockDIBackend:
+    """KASAN SW_TAGS용 mock backend fixture."""
+    backend = MockDIBackend()
+    backend.setup_kasan_sw_tags()
+    return backend
+
+
+@pytest.fixture
+def kasan_analyzer(
+    kasan_mock_backend: MockDIBackend,
+    struct_helper,
+    address_translator,
+    kernel_resolver,
+):
+    """KasanAnalyzer fixture."""
+    from di_memory.analyzers.kasan import KasanAnalyzer
+    from di_memory.core.address_translator import AddressTranslator
+    from di_memory.core.kernel_resolver import KernelResolver
+    from di_memory.core.struct_helper import StructHelper
+
+    structs = StructHelper(kasan_mock_backend)
+    addr = AddressTranslator(kasan_mock_backend)
+    symbols = KernelResolver(kasan_mock_backend)
+
+    return KasanAnalyzer(
+        backend=kasan_mock_backend,
+        structs=structs,
+        addr=addr,
+        symbols=symbols,
     )
