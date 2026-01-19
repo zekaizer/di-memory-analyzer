@@ -120,7 +120,7 @@ class KernelResolver:
 
     def get_enum_value(self, enum_name: str, member: str) -> int | None:
         """
-        Enum 특정 멤버의 값 조회.
+        Enum 특정 멤버의 값 조회 (캐시 활용).
 
         Args:
             enum_name: enum 타입 이름
@@ -129,4 +129,7 @@ class KernelResolver:
         Returns:
             멤버 값 또는 None
         """
-        return self._backend.get_enum_value(enum_name, member)
+        enum = self.get_enum(enum_name)
+        if enum is None:
+            return None
+        return enum.get(member)
