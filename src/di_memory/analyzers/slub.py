@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from di_memory.backend.protocol import DIBackend
     from di_memory.core.address_translator import AddressTranslator
     from di_memory.core.kernel_resolver import KernelResolver
+    from di_memory.core.stackdepot import StackDepotResolver
     from di_memory.core.struct_helper import StructHelper
 
 
@@ -35,6 +36,7 @@ class SlubAnalyzer(BaseAnalyzer):
             symbols: KernelResolver 인스턴스
         """
         super().__init__(backend, structs, addr, symbols)
+        self._stack_depot: StackDepotResolver | None = None
 
     # =========================================================================
     # Properties
@@ -57,6 +59,15 @@ class SlubAnalyzer(BaseAnalyzer):
     def has_stackdepot(self) -> bool:
         """CONFIG_STACKDEPOT 활성화 여부."""
         return self._symbols.is_config_enabled("CONFIG_STACKDEPOT")
+
+    @property
+    def stack_depot(self) -> StackDepotResolver | None:
+        """StackDepotResolver 인스턴스 (lazy init)."""
+        if self._stack_depot is None and self.has_stackdepot:
+            from di_memory.core.stackdepot import StackDepotResolver
+
+            self._stack_depot = StackDepotResolver(self._backend, self._symbols)
+        return self._stack_depot
 
     # =========================================================================
     # SLAB Flags
@@ -716,6 +727,6 @@ class SlubAnalyzer(BaseAnalyzer):
         Returns:
             resolved 스택 문자열 리스트
         """
-        # StackDepotResolver는 나중에 구현 예정
-        # 현재는 빈 리스트 반환
-        return []
+        if self.stack_depot is None:
+            return []
+        return self.stack_depot.resolve_stack(handle)
