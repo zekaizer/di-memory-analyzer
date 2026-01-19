@@ -8,6 +8,7 @@ Page, SLUB, KASAN, Folio 서브시스템 분석 및 메모리 corruption 탐지 
 ## 기술 스택
 
 - Python 3.10+
+- uv (프로젝트/패키지 매니저)
 - ctypes (커널 구조체 접근)
 - DINotebookWrapper (DI 환경 인터페이스)
 
@@ -239,13 +240,13 @@ def slub_analyzer(mock_backend):
 
 ```bash
 # 전체 테스트
-pytest
+uv run pytest
 
 # 특정 모듈
-pytest tests/unit/analyzers/test_slub.py
+uv run pytest tests/unit/analyzers/test_slub.py
 
 # Coverage
-pytest --cov=di_memory
+uv run pytest --cov=di_memory
 ```
 
 ## 커밋 메시지 규칙
