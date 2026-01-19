@@ -34,6 +34,67 @@ class MockPage(ctypes.Structure):
     ]
 
 
+class MockListHead(ctypes.Structure):
+    """Mock struct list_head."""
+
+    _fields_ = [
+        ("next", ctypes.c_ulong),
+        ("prev", ctypes.c_ulong),
+    ]
+
+
+class MockKmemCache(ctypes.Structure):
+    """Mock struct kmem_cache (Linux 6.12+)."""
+
+    _fields_ = [
+        ("name", ctypes.c_ulong),  # char* - cache name pointer
+        ("size", ctypes.c_uint),  # object size with padding
+        ("object_size", ctypes.c_uint),  # actual object size
+        ("offset", ctypes.c_uint),  # freelist pointer offset
+        ("oo", ctypes.c_uint),  # objects per slab (packed)
+        ("flags", ctypes.c_ulong),  # slab flags
+        ("random", ctypes.c_ulong),  # FREELIST_HARDENED random value
+        ("list", MockListHead),  # slab_caches list node
+        ("cpu_slab", ctypes.c_ulong),  # per-cpu slab pointer
+        ("node", ctypes.c_ulong),  # per-node pointer array
+    ]
+
+
+class MockSlab(ctypes.Structure):
+    """Mock struct slab (Linux 6.1+)."""
+
+    _fields_ = [
+        ("__page_flags", ctypes.c_ulong),
+        ("slab_cache", ctypes.c_ulong),  # kmem_cache pointer
+        ("freelist", ctypes.c_ulong),  # free object list
+        ("inuse", ctypes.c_uint),  # objects in use (or counters)
+        ("objects", ctypes.c_uint),  # total objects
+        ("frozen", ctypes.c_uint),  # slab frozen flag
+        ("slab_list", MockListHead),  # partial/full list node
+    ]
+
+
+class MockKmemCacheCpu(ctypes.Structure):
+    """Mock struct kmem_cache_cpu."""
+
+    _fields_ = [
+        ("freelist", ctypes.c_ulong),  # fast path free list
+        ("tid", ctypes.c_ulong),  # transaction ID
+        ("slab", ctypes.c_ulong),  # current slab
+        ("partial", ctypes.c_ulong),  # partial slab list
+    ]
+
+
+class MockKmemCacheNode(ctypes.Structure):
+    """Mock struct kmem_cache_node."""
+
+    _fields_ = [
+        ("partial", MockListHead),  # partial slab list
+        ("nr_partial", ctypes.c_ulong),  # partial slab count
+        ("full", MockListHead),  # full slab list (CONFIG_SLUB_DEBUG)
+    ]
+
+
 # =============================================================================
 # Mock Backend
 # =============================================================================
@@ -49,6 +110,12 @@ class MockDIBackend:
         self._configs: dict[str, bool | int | str] = {}
         self._memory: dict[int, bytes] = {}
         self._pages: dict[int, MockPage] = {}
+        # SLUB 캐시
+        self._caches: dict[int, MockKmemCache] = {}
+        self._slabs: dict[int, MockSlab] = {}
+        self._cache_cpus: dict[int, MockKmemCacheCpu] = {}
+        self._cache_nodes: dict[int, MockKmemCacheNode] = {}
+        self._strings: dict[int, str] = {}  # 문자열 저장
 
         # 기본 설정
         self._setup_defaults()
@@ -93,9 +160,73 @@ class MockDIBackend:
             },
         )
 
+        # struct list_head 등록
+        self._structs["struct list_head"] = (
+            ctypes.sizeof(MockListHead),
+            {"next": 0, "prev": 8},
+        )
+
+        # struct kmem_cache 등록 (Linux 6.12+)
+        # 필드 오프셋은 _fields_ 순서에 따라 자동 계산
+        self._structs["struct kmem_cache"] = (
+            ctypes.sizeof(MockKmemCache),
+            {
+                "name": 0,
+                "size": 8,
+                "object_size": 12,
+                "offset": 16,
+                "oo": 20,
+                "flags": 24,
+                "random": 32,
+                "list": 40,  # MockListHead는 16바이트
+                "cpu_slab": 56,
+                "node": 64,
+            },
+        )
+
+        # struct slab 등록 (Linux 6.1+)
+        self._structs["struct slab"] = (
+            ctypes.sizeof(MockSlab),
+            {
+                "__page_flags": 0,
+                "slab_cache": 8,
+                "freelist": 16,
+                "inuse": 24,
+                "objects": 28,
+                "frozen": 32,
+                "slab_list": 40,  # MockListHead
+            },
+        )
+
+        # struct kmem_cache_cpu 등록
+        self._structs["struct kmem_cache_cpu"] = (
+            ctypes.sizeof(MockKmemCacheCpu),
+            {
+                "freelist": 0,
+                "tid": 8,
+                "slab": 16,
+                "partial": 24,
+            },
+        )
+
+        # struct kmem_cache_node 등록
+        self._structs["struct kmem_cache_node"] = (
+            ctypes.sizeof(MockKmemCacheNode),
+            {
+                "partial": 0,  # MockListHead
+                "nr_partial": 16,
+                "full": 24,  # MockListHead
+            },
+        )
+
+        # SLUB 관련 CONFIG
+        self._configs["CONFIG_SLUB_DEBUG"] = True
+        self._configs["CONFIG_SLAB_FREELIST_HARDENED"] = True
+
         # 기본 심볼
         self._symbols["vmemmap"] = 0xFFFF_EA00_0000_0000
         self._symbols["max_pfn"] = 0xFFFF_FFFF_8100_0000
+        self._symbols["slab_caches"] = 0xFFFF_FFFF_8200_0000  # slab_caches list_head
 
         # vmemmap 포인터 값 설정
         self._memory[0xFFFF_EA00_0000_0000] = (0xFFFF_EA00_0000_0000).to_bytes(
@@ -103,6 +234,13 @@ class MockDIBackend:
         )
         # max_pfn 값 설정 (예: 0x100000 = 1M pages)
         self._memory[0xFFFF_FFFF_8100_0000] = (0x100000).to_bytes(8, "little")
+
+        # slab_caches 빈 리스트 초기화 (next = prev = self)
+        slab_caches_addr = 0xFFFF_FFFF_8200_0000
+        self._memory[slab_caches_addr] = slab_caches_addr.to_bytes(8, "little")  # next
+        self._memory[slab_caches_addr + 8] = slab_caches_addr.to_bytes(
+            8, "little"
+        )  # prev
 
     # =========================================================================
     # Structure 메타정보
@@ -154,6 +292,58 @@ class MockDIBackend:
             self._pages[original_addr] = page
             return page
 
+        if type_name == "struct kmem_cache":
+            if original_addr in self._caches:
+                cache = self._caches[original_addr]
+                cache._base = original_addr
+                cache._struct = type_name
+                return cache
+            # 새 캐시 생성
+            cache = MockKmemCache()
+            cache._base = original_addr
+            cache._struct = type_name
+            self._caches[original_addr] = cache
+            return cache
+
+        if type_name == "struct slab":
+            if original_addr in self._slabs:
+                slab = self._slabs[original_addr]
+                slab._base = original_addr
+                slab._struct = type_name
+                return slab
+            # 새 slab 생성
+            slab = MockSlab()
+            slab._base = original_addr
+            slab._struct = type_name
+            self._slabs[original_addr] = slab
+            return slab
+
+        if type_name == "struct kmem_cache_cpu":
+            if original_addr in self._cache_cpus:
+                cpu = self._cache_cpus[original_addr]
+                cpu._base = original_addr
+                cpu._struct = type_name
+                return cpu
+            # 새 cpu slab 생성
+            cpu = MockKmemCacheCpu()
+            cpu._base = original_addr
+            cpu._struct = type_name
+            self._cache_cpus[original_addr] = cpu
+            return cpu
+
+        if type_name == "struct kmem_cache_node":
+            if original_addr in self._cache_nodes:
+                node = self._cache_nodes[original_addr]
+                node._base = original_addr
+                node._struct = type_name
+                return node
+            # 새 node 생성
+            node = MockKmemCacheNode()
+            node._base = original_addr
+            node._struct = type_name
+            self._cache_nodes[original_addr] = node
+            return node
+
         return 0
 
     def read_u8(self, addr: int | str) -> int:
@@ -180,6 +370,15 @@ class MockDIBackend:
         return self.read_u64(addr)
 
     def read_string(self, addr: int | str, max_len: int = 256) -> str:
+        if isinstance(addr, str):
+            resolved = self._symbols.get(addr)
+            if resolved is None:
+                raise KeyError(f"Unknown symbol: {addr}")
+            addr = resolved
+        # 문자열 캐시에서 찾기
+        if addr in self._strings:
+            return self._strings[addr][:max_len]
+        # 메모리에서 읽기
         data = self.read_bytes(addr, max_len)
         null_idx = data.find(b"\x00")
         if null_idx >= 0:
@@ -272,6 +471,181 @@ class MockDIBackend:
         self._pages[page_addr] = page
         return page
 
+    # =========================================================================
+    # SLUB 테스트 헬퍼
+    # =========================================================================
+
+    def register_string(self, addr: int, value: str) -> None:
+        """문자열 등록."""
+        self._strings[addr] = value
+
+    def register_kmem_cache(
+        self,
+        addr: int,
+        name: str,
+        object_size: int,
+        size: int | None = None,
+        offset: int = 0,
+        random: int = 0,
+        flags: int = 0,
+    ) -> MockKmemCache:
+        """
+        kmem_cache 등록.
+
+        Args:
+            addr: cache 주소
+            name: cache 이름
+            object_size: 실제 object 크기
+            size: 패딩 포함 크기 (기본: object_size)
+            offset: freelist pointer offset
+            random: FREELIST_HARDENED random 값
+            flags: slab flags
+        """
+        if size is None:
+            size = object_size
+
+        cache = MockKmemCache()
+        # name 문자열 저장 (별도 주소에)
+        name_addr = addr + 0x1000  # cache 구조체 뒤에 name 저장
+        self._strings[name_addr] = name
+        cache.name = name_addr
+        cache.object_size = object_size
+        cache.size = size
+        cache.offset = offset
+        cache.random = random
+        cache.flags = flags
+        # list는 나중에 연결
+
+        self._caches[addr] = cache
+        return cache
+
+    def register_slab(
+        self,
+        addr: int,
+        cache_addr: int,
+        objects: int,
+        inuse: int,
+        freelist: int = 0,
+        frozen: int = 0,
+    ) -> MockSlab:
+        """
+        slab 등록.
+
+        Args:
+            addr: slab 주소
+            cache_addr: 소속 kmem_cache 주소
+            objects: 총 object 수
+            inuse: 사용 중인 object 수
+            freelist: 첫 번째 free object 주소 (또는 encoded)
+            frozen: frozen 플래그
+        """
+        slab = MockSlab()
+        slab.slab_cache = cache_addr
+        slab.objects = objects
+        slab.inuse = inuse
+        slab.freelist = freelist
+        slab.frozen = frozen
+
+        self._slabs[addr] = slab
+        return slab
+
+    def link_caches(self, cache_addrs: list[int]) -> None:
+        """
+        kmem_cache들을 slab_caches 리스트에 연결.
+
+        Args:
+            cache_addrs: cache 주소들의 리스트 (순서대로 연결)
+        """
+        slab_caches = self._symbols["slab_caches"]
+        list_offset = self.offsetof("struct kmem_cache", "list")
+
+        if not cache_addrs:
+            # 빈 리스트
+            self._memory[slab_caches] = slab_caches.to_bytes(8, "little")
+            self._memory[slab_caches + 8] = slab_caches.to_bytes(8, "little")
+            return
+
+        # 첫 번째 cache의 list.next를 slab_caches.next로
+        first_list = cache_addrs[0] + list_offset
+        last_list = cache_addrs[-1] + list_offset
+
+        # slab_caches -> first
+        self._memory[slab_caches] = first_list.to_bytes(8, "little")
+        # last -> slab_caches
+        self._memory[last_list] = slab_caches.to_bytes(8, "little")
+        self._memory[last_list + 8] = (
+            cache_addrs[-2] + list_offset if len(cache_addrs) > 1 else slab_caches
+        ).to_bytes(8, "little")
+
+        # slab_caches.prev = last
+        self._memory[slab_caches + 8] = last_list.to_bytes(8, "little")
+
+        # 각 cache 연결
+        for i, addr in enumerate(cache_addrs):
+            list_addr = addr + list_offset
+            # next
+            if i < len(cache_addrs) - 1:
+                next_addr = cache_addrs[i + 1] + list_offset
+            else:
+                next_addr = slab_caches
+            # prev
+            prev_addr = cache_addrs[i - 1] + list_offset if i > 0 else slab_caches
+
+            self._memory[list_addr] = next_addr.to_bytes(8, "little")
+            self._memory[list_addr + 8] = prev_addr.to_bytes(8, "little")
+
+    def setup_freelist(
+        self,
+        slab: MockSlab,
+        cache: MockKmemCache,
+        free_indices: list[int],
+        slab_virt_addr: int,
+        hardened: bool = False,
+    ) -> None:
+        """
+        Slab의 freelist 체인 설정.
+
+        Args:
+            slab: MockSlab 인스턴스
+            cache: MockKmemCache 인스턴스
+            free_indices: free object 인덱스 리스트 (순서대로 체인)
+            slab_virt_addr: slab의 가상 주소 (object 시작점)
+            hardened: FREELIST_HARDENED 인코딩 적용 여부
+        """
+        if not free_indices:
+            slab.freelist = 0
+            return
+
+        obj_size = cache.size
+        fp_offset = cache.offset
+        random = cache.random
+
+        def encode_ptr(ptr: int, ptr_addr: int) -> int:
+            if not hardened:
+                return ptr
+            # freelist_ptr_encode: ptr ^ random ^ swab64(ptr_addr)
+            swab = int.from_bytes(ptr_addr.to_bytes(8, "little"), "big")
+            return ptr ^ random ^ swab
+
+        # 첫 번째 free object
+        first_obj = slab_virt_addr + free_indices[0] * obj_size
+        # slab.freelist는 첫 번째 free object를 가리킴 (인코딩 필요 시)
+        slab_freelist_addr = slab._base + self.offsetof("struct slab", "freelist")
+        slab.freelist = encode_ptr(first_obj, slab_freelist_addr)
+
+        # 체인 연결
+        for i, idx in enumerate(free_indices):
+            obj_addr = slab_virt_addr + idx * obj_size
+            fp_addr = obj_addr + fp_offset
+
+            if i < len(free_indices) - 1:
+                next_obj = slab_virt_addr + free_indices[i + 1] * obj_size
+                encoded = encode_ptr(next_obj, fp_addr)
+            else:
+                encoded = encode_ptr(0, fp_addr)  # 마지막은 NULL
+
+            self._memory[fp_addr] = encoded.to_bytes(8, "little")
+
 
 # =============================================================================
 # Fixtures
@@ -332,3 +706,21 @@ def page_flags_helper(kernel_resolver):
     from di_memory.utils.flags import PageFlagsHelper
 
     return PageFlagsHelper(kernel_resolver)
+
+
+@pytest.fixture
+def slub_analyzer(
+    mock_backend: MockDIBackend,
+    struct_helper,
+    address_translator,
+    kernel_resolver,
+):
+    """SlubAnalyzer fixture."""
+    from di_memory.analyzers.slub import SlubAnalyzer
+
+    return SlubAnalyzer(
+        backend=mock_backend,
+        structs=struct_helper,
+        addr=address_translator,
+        symbols=kernel_resolver,
+    )
