@@ -68,4 +68,4 @@ uv run pytest --cov=di_memory
 
 ## License
 
-Internal use only.
+MIT License - see [LICENSE](LICENSE) for details.
