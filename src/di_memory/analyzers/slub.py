@@ -268,13 +268,16 @@ class SlubAnalyzer(BaseAnalyzer):
         current = slab.freelist
 
         seen: set[int] = set()
-        while current != 0 and current not in seen:
-            seen.add(current)
-
+        while current != 0:
             # 디코딩
             decoded = self._decode_freeptr(cache, current, ptr_addr)
             if decoded == 0:
                 break
+
+            # cycle 검사 (decoded 기준)
+            if decoded in seen:
+                break
+            seen.add(decoded)
 
             # 유효성 검사
             if not self._is_valid_object_addr(decoded, slab, cache):
@@ -425,26 +428,31 @@ class SlubAnalyzer(BaseAnalyzer):
         current = slab.freelist
 
         errors: list[dict] = []
-        seen: set[int] = set()
+        seen: set[int] = set()  # decoded 주소 기준 cycle 검사
         free_count = 0
 
         while current != 0:
-            if current in seen:
+            decoded = self._decode_freeptr(cache, current, ptr_addr)
+
+            if decoded == 0:
+                break
+
+            # cycle 검사 (decoded 기준)
+            if decoded in seen:
                 errors.append(
                     {
                         "type": "cycle",
                         "ptr_addr": ptr_addr,
                         "encoded_value": current,
-                        "details": f"Cycle detected at {hex(current)}",
+                        "decoded_value": decoded,
+                        "details": f"Cycle detected at {hex(decoded)}",
                     }
                 )
                 break
+            seen.add(decoded)
 
-            seen.add(current)
-
-            decoded = self._decode_freeptr(cache, current, ptr_addr)
-
-            if decoded != 0 and not self._is_valid_object_addr(decoded, slab, cache):
+            # 유효성 검사
+            if not self._is_valid_object_addr(decoded, slab, cache):
                 base = self.slab_to_virt(slab)
                 end = base + slab.objects * cache.size
                 errors.append(
@@ -458,11 +466,11 @@ class SlubAnalyzer(BaseAnalyzer):
                 )
                 break
 
-            if decoded != 0:
-                free_count += 1
+            free_count += 1
 
-            ptr_addr = decoded + fp_offset if decoded != 0 else 0
-            current = self._backend.read_pointer(ptr_addr) if decoded != 0 else 0
+            # 다음 포인터 읽기
+            ptr_addr = decoded + fp_offset
+            current = self._backend.read_pointer(ptr_addr)
 
         expected_free = slab.objects - slab.inuse
 
@@ -608,7 +616,9 @@ class SlubAnalyzer(BaseAnalyzer):
     # 주소 역추적
     # =========================================================================
 
-    def find_owning_cache(self, addr: int) -> tuple | None:
+    def find_owning_cache(
+        self, addr: int
+    ) -> tuple[ctypes.Structure, ctypes.Structure, int, int] | None:
         """
         주소가 속한 slab cache 찾기.
 
