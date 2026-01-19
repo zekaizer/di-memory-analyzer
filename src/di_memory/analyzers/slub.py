@@ -589,7 +589,9 @@ class SlubAnalyzer(BaseAnalyzer):
         SLAB_RED_ZONE이면 inuse + sizeof(void*), 아니면 inuse.
         """
         if self._test_slab_flag(cache, "SLAB_RED_ZONE"):
-            return cache.inuse + 8  # sizeof(void*) for redzone
+            # redzone은 sizeof(void*) 크기
+            ptr_size = 8  # 64-bit 시스템 가정
+            return cache.inuse + ptr_size
         return cache.inuse
 
     def _get_track_size(self) -> int:
