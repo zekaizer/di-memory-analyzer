@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import ctypes
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
-
-if TYPE_CHECKING:
-    pass
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -25,18 +22,18 @@ class DIBackend(Protocol):
     # Structure 메타정보
     # =========================================================================
 
-    def sizeof(self, struct_name: str) -> int:
+    def sizeof(self, type_name: str) -> int:
         """
-        구조체의 크기를 반환.
+        타입의 크기를 반환.
 
         Args:
-            struct_name: 구조체 이름 (예: "struct kmem_cache")
+            type_name: 타입 이름 (예: "struct kmem_cache", "int")
 
         Returns:
-            구조체 크기 (bytes)
+            타입 크기 (bytes)
 
         Raises:
-            KeyError: 구조체가 존재하지 않는 경우
+            KeyError: 타입이 존재하지 않는 경우
         """
         ...
 
