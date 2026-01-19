@@ -230,7 +230,7 @@ class PageAnalyzer(BaseAnalyzer):
         if self._structs.has_member("struct page", "compound_order"):
             return head.compound_order
         # 구버전: first tail page에 저장
-        head_pfn = self._addr.page_to_pfn(head)
+        head_pfn = self._addr.page_to_pfn(head._base)
         first_tail = self._addr.pfn_to_page(head_pfn + 1)
         return first_tail.compound_order
 

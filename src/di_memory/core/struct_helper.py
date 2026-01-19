@@ -47,9 +47,13 @@ class StructHelper:
             type_name: 타입 이름. addr이 심볼인 경우 생략 가능.
 
         Returns:
-            struct인 경우 ctypes.Structure, 기본 타입인 경우 int
+            struct인 경우 ctypes.Structure (._base 속성 포함), 기본 타입인 경우 int
         """
-        return self._backend.read_type(addr, type_name)
+        result = self._backend.read_type(addr, type_name)
+        # struct인 경우 ._base 속성에 원본 주소 저장
+        if isinstance(result, ctypes.Structure) and isinstance(addr, int):
+            result._base = addr
+        return result
 
     def read_member(
         self,
@@ -123,6 +127,7 @@ class StructHelper:
             # container_of: list_head 주소에서 구조체 시작 주소 계산
             entry_addr = current - member_offset
             entry = self._backend.read_type(entry_addr, struct_name)
+            entry._base = entry_addr
             yield entry
 
             # 다음 엔트리
