@@ -51,7 +51,7 @@ class SlubAnalyzer(BaseAnalyzer):
     @property
     def is_hardened(self) -> bool:
         """CONFIG_SLAB_FREELIST_HARDENED 활성화 여부."""
-        return bool(self._symbols.get_config("CONFIG_SLAB_FREELIST_HARDENED"))
+        return self._symbols.is_config_enabled("CONFIG_SLAB_FREELIST_HARDENED")
 
     # =========================================================================
     # Cache 조회/순회
