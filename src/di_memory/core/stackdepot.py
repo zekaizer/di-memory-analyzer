@@ -1,4 +1,4 @@
-"""Stack depot 핸들에서 스택 트레이스 추출."""
+"""Stack depot 핸들에서 스택 트레이스 추출 (Linux 6.12+)."""
 
 from __future__ import annotations
 
@@ -11,25 +11,36 @@ if TYPE_CHECKING:
 
 class StackDepotResolver:
     """
-    Stack depot 핸들에서 스택 트레이스 추출.
+    Stack depot 핸들에서 스택 트레이스 추출 (Linux 6.12+).
 
-    Linux 커널의 lib/stackdepot.c 구조:
-    - depot_stack_handle_t는 32비트 핸들
-    - 핸들 구조: pool_index | offset | extra
-    - stack_pools[pool_index][offset] 에서 실제 스택 데이터 조회
+    Linux 6.12+ lib/stackdepot.c 기반:
+
+    Handle 구조 (union handle_parts, 32비트):
+        - bits 0-20:  pool_index_plus_1 (21 bits)
+        - bits 21-30: offset (10 bits)
+        - bit 31:     extra (1 bit)
 
     struct stack_record {
         struct list_head hash_list;
         u32 hash;
-        u32 size;                    # 스택 프레임 수
-        unsigned long entries[];     # 스택 주소 배열
+        u32 size;                    // 스택 프레임 수
+        union handle_parts handle;
+        refcount_t count;
+        unsigned long entries[];     // 스택 주소 배열
     };
+
+    스택 주소 조회: stack_pools[pool_index][offset * DEPOT_STACK_ALIGN]
     """
 
-    # Stack depot 상수 (Linux 5.x+)
-    # lib/stackdepot.c에서 정의
-    DEPOT_POOL_ORDER = 2  # 페이지 단위
-    DEPOT_STACK_ALIGN = 4
+    # Linux 6.12+ 상수 (lib/stackdepot.c)
+    DEPOT_POOL_INDEX_BITS = 21
+    DEPOT_OFFSET_BITS = 10
+    DEPOT_EXTRA_BITS = 1
+    DEPOT_STACK_ALIGN = 4  # sizeof(unsigned int)
+
+    # Handle 비트 마스크
+    POOL_INDEX_MASK = (1 << DEPOT_POOL_INDEX_BITS) - 1  # 0x1FFFFF
+    OFFSET_MASK = (1 << DEPOT_OFFSET_BITS) - 1  # 0x3FF
 
     def __init__(
         self,
@@ -39,6 +50,7 @@ class StackDepotResolver:
         self._backend = backend
         self._symbols = symbols
         self._pools_addr: int | None = None
+        self._record_entries_offset: int | None = None
 
     @property
     def stack_pools(self) -> int | None:
@@ -49,11 +61,12 @@ class StackDepotResolver:
 
     def _parse_handle(self, handle: int) -> tuple[int, int, int]:
         """
-        핸들에서 pool_index, offset, extra 추출.
+        핸들에서 pool_index, offset, extra 추출 (Linux 6.12+).
 
-        Linux 5.x+ 핸들 구조 (32비트):
-        - 상위 비트: pool_index
-        - 하위 비트: offset + extra
+        Handle 비트 구조:
+            [31]    extra (1 bit)
+            [30:21] offset (10 bits)
+            [20:0]  pool_index_plus_1 (21 bits)
 
         Args:
             handle: depot_stack_handle_t (32비트)
@@ -61,13 +74,47 @@ class StackDepotResolver:
         Returns:
             (pool_index, offset_in_pool, extra)
         """
-        # 커널 버전에 따라 비트 구조가 다를 수 있음
-        # Linux 5.x: pool_index(상위), offset(하위)
-        # 기본적으로 상위 16비트가 pool_index
-        pool_index = (handle >> 16) & 0xFFFF
-        offset = (handle & 0xFFFF) << self.DEPOT_STACK_ALIGN
-        extra = 0  # 사용하지 않음
+        pool_index_plus_1 = handle & self.POOL_INDEX_MASK
+        offset_raw = (handle >> self.DEPOT_POOL_INDEX_BITS) & self.OFFSET_MASK
+        extra = (handle >> 31) & 0x1
+
+        # pool_index_plus_1이 0이면 invalid handle
+        if pool_index_plus_1 == 0:
+            return -1, 0, extra
+
+        pool_index = pool_index_plus_1 - 1
+        # offset은 DEPOT_STACK_ALIGN 단위로 저장됨
+        offset = offset_raw << self.DEPOT_STACK_ALIGN
+
         return pool_index, offset, extra
+
+    def _get_entries_offset(self) -> int:
+        """
+        struct stack_record의 entries 오프셋 (캐싱).
+
+        Linux 6.12+ struct stack_record:
+            list_head hash_list (16)
+            u32 hash (4)
+            u32 size (4)
+            union handle_parts handle (4)
+            refcount_t count (4)
+            entries[] (가변)
+
+        총 고정 크기: 32 bytes
+        """
+        if self._record_entries_offset is not None:
+            return self._record_entries_offset
+
+        try:
+            self._record_entries_offset = self._backend.offsetof(
+                "struct stack_record", "entries"
+            )
+        except (KeyError, ValueError):
+            # Linux 6.12+ 기본 오프셋
+            # hash_list(16) + hash(4) + size(4) + handle(4) + count(4) = 32
+            self._record_entries_offset = 32
+
+        return self._record_entries_offset
 
     def resolve_handle(self, handle: int) -> list[int]:
         """
@@ -87,10 +134,15 @@ class StackDepotResolver:
             return []
 
         pool_index, offset, _ = self._parse_handle(handle)
+        if pool_index < 0:
+            return []
 
-        # stack_pools[pool_index] 읽기 (포인터 배열)
-        pool_ptr_addr = pools_addr + pool_index * 8  # sizeof(void*)
-        pool_ptr = self._backend.read_pointer(pool_ptr_addr)
+        # stack_pools[pool_index] 읽기
+        try:
+            pool_ptr = self._backend.read_pointer(pools_addr + pool_index * 8)
+        except Exception:
+            return []
+
         if pool_ptr == 0:
             return []
 
@@ -100,27 +152,30 @@ class StackDepotResolver:
         # stack_record.size 읽기
         try:
             size_offset = self._backend.offsetof("struct stack_record", "size")
-            size = self._backend.read_u32(record_addr + size_offset)
         except (KeyError, ValueError):
+            # Linux 6.12+ 기본: hash_list(16) + hash(4) = 20
+            size_offset = 20
+
+        try:
+            size = self._backend.read_u32(record_addr + size_offset)
+        except Exception:
             return []
 
-        # 최대 32 프레임으로 제한
-        size = min(size, 32)
+        # 최대 프레임 수 제한 (CONFIG_STACKDEPOT_MAX_FRAMES 기본값 64)
+        size = min(size, 64)
         if size == 0:
             return []
 
         # entries 배열 읽기
-        try:
-            entries_offset = self._backend.offsetof("struct stack_record", "entries")
-        except (KeyError, ValueError):
-            # 기본 오프셋 사용 (hash_list(16) + hash(4) + size(4) = 24)
-            entries_offset = 24
-
+        entries_offset = self._get_entries_offset()
         entries_addr = record_addr + entries_offset
 
         addrs: list[int] = []
         for i in range(size):
-            addr = self._backend.read_pointer(entries_addr + i * 8)
+            try:
+                addr = self._backend.read_pointer(entries_addr + i * 8)
+            except Exception:
+                break
             if addr == 0:
                 break
             addrs.append(addr)
@@ -139,3 +194,25 @@ class StackDepotResolver:
         """
         addrs = self.resolve_handle(handle)
         return self._symbols.resolve_stack(addrs)
+
+    @staticmethod
+    def encode_handle(pool_index: int, offset: int, extra: int = 0) -> int:
+        """
+        테스트용: pool_index, offset, extra를 핸들로 인코딩.
+
+        Args:
+            pool_index: pool 인덱스 (0-based)
+            offset: pool 내 오프셋 (바이트 단위, DEPOT_STACK_ALIGN 배수)
+            extra: extra 비트 (0 또는 1)
+
+        Returns:
+            depot_stack_handle_t (32비트)
+        """
+        pool_index_plus_1 = pool_index + 1
+        offset_raw = offset >> StackDepotResolver.DEPOT_STACK_ALIGN
+
+        handle = pool_index_plus_1 & StackDepotResolver.POOL_INDEX_MASK
+        handle |= (offset_raw & StackDepotResolver.OFFSET_MASK) << StackDepotResolver.DEPOT_POOL_INDEX_BITS
+        handle |= (extra & 0x1) << 31
+
+        return handle

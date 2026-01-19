@@ -1,4 +1,4 @@
-"""StackDepotResolver 테스트."""
+"""StackDepotResolver 테스트 (Linux 6.12+)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def stack_depot_resolver(mock_backend: MockDIBackend, kernel_resolver):
 
 @pytest.fixture
 def setup_stack_depot(mock_backend: MockDIBackend):
-    """Stack depot 데이터 설정."""
+    """Stack depot 데이터 설정 (Linux 6.12+ 형식)."""
     # stack_pools 심볼 및 pool 설정
     stack_pools_addr = 0xFFFF_FFFF_8300_0000
     mock_backend._symbols["stack_pools"] = stack_pools_addr
@@ -30,14 +30,23 @@ def setup_stack_depot(mock_backend: MockDIBackend):
     # pool[1] 포인터 설정 (NULL)
     mock_backend._memory[stack_pools_addr + 8] = (0).to_bytes(8, "little")
 
-    # stack_record at pool_0 + offset
-    # handle = (pool_index << 16) | (offset >> 4)
-    # pool_index = 0, offset = 0x100 -> handle = 0x0000_0010
-    record_addr = pool_0_addr + 0x100
+    # Linux 6.12+ handle format:
+    # - bits 0-20:  pool_index_plus_1 (21 bits)
+    # - bits 21-30: offset (10 bits)
+    # - bit 31:     extra (1 bit)
+    #
+    # pool_index=0, offset=0x100 일 때:
+    # - pool_index_plus_1 = 1
+    # - offset_raw = 0x100 >> 4 = 0x10
+    # - handle = 1 | (0x10 << 21) = 0x02000001
+    record_offset = 0x100
+    handle = StackDepotResolver.encode_handle(pool_index=0, offset=record_offset)
 
-    # struct stack_record layout:
-    # hash_list (16) + hash (4) + size (4) + entries[]
-    # entries offset = 24
+    record_addr = pool_0_addr + record_offset
+
+    # struct stack_record layout (Linux 6.12+):
+    # hash_list (16) + hash (4) + size (4) + handle (4) + count (4) + entries[]
+    # entries offset = 32
 
     # size = 3 frames
     size_offset = mock_backend.offsetof("struct stack_record", "size")
@@ -63,10 +72,11 @@ def setup_stack_depot(mock_backend: MockDIBackend):
     mock_backend._symbols["do_something"] = 0xFFFF_FFFF_8100_9A00
 
     return {
-        "handle": 0x0000_0010,  # pool_index=0, offset=0x100 (shifted by 4)
+        "handle": handle,
         "stack_addrs": stack_addrs,
         "pool_addr": pool_0_addr,
         "record_addr": record_addr,
+        "record_offset": record_offset,
     }
 
 
@@ -87,6 +97,12 @@ class TestStackDepotResolverBasic:
     def test_resolve_handle_zero(self, stack_depot_resolver):
         """핸들 0은 빈 스택."""
         result = stack_depot_resolver.resolve_handle(0)
+        assert result == []
+
+    def test_resolve_handle_invalid_pool_index(self, stack_depot_resolver):
+        """pool_index_plus_1 = 0 인 경우 (invalid)."""
+        # handle의 하위 21비트가 0이면 invalid
+        result = stack_depot_resolver.resolve_handle(0x02000000)  # pool_index_plus_1=0
         assert result == []
 
 
@@ -121,29 +137,62 @@ class TestStackDepotResolverResolve:
     def test_resolve_handle_invalid_pool(
         self, mock_backend, kernel_resolver, setup_stack_depot
     ):
-        """유효하지 않은 pool index."""
+        """유효하지 않은 pool index (NULL pool)."""
         resolver = StackDepotResolver(mock_backend, kernel_resolver)
 
         # pool_index = 1 (NULL pool)
-        invalid_handle = 0x0001_0010
+        invalid_handle = StackDepotResolver.encode_handle(pool_index=1, offset=0x100)
         result = resolver.resolve_handle(invalid_handle)
 
         assert result == []
 
 
 class TestStackDepotResolverParseHandle:
-    """_parse_handle 메서드 테스트."""
+    """_parse_handle 메서드 테스트 (Linux 6.12+ 형식)."""
 
-    def test_parse_handle(self, stack_depot_resolver):
-        """핸들 파싱."""
-        # handle = 0x0000_0010 -> pool_index=0, offset=0x100
-        pool_index, offset, extra = stack_depot_resolver._parse_handle(0x0000_0010)
+    def test_parse_handle_basic(self, stack_depot_resolver):
+        """기본 핸들 파싱."""
+        # pool_index=0, offset=0x100
+        handle = StackDepotResolver.encode_handle(pool_index=0, offset=0x100)
+        pool_index, offset, extra = stack_depot_resolver._parse_handle(handle)
+
         assert pool_index == 0
-        assert offset == 0x100  # 0x10 << 4
+        assert offset == 0x100
+        assert extra == 0
 
     def test_parse_handle_with_pool_index(self, stack_depot_resolver):
         """pool index가 있는 핸들."""
-        # handle = 0x0001_0020 -> pool_index=1, offset=0x200
-        pool_index, offset, extra = stack_depot_resolver._parse_handle(0x0001_0020)
-        assert pool_index == 1
+        # pool_index=5, offset=0x200
+        handle = StackDepotResolver.encode_handle(pool_index=5, offset=0x200)
+        pool_index, offset, extra = stack_depot_resolver._parse_handle(handle)
+
+        assert pool_index == 5
         assert offset == 0x200
+        assert extra == 0
+
+    def test_parse_handle_with_extra(self, stack_depot_resolver):
+        """extra 비트가 설정된 핸들."""
+        # pool_index=0, offset=0x100, extra=1
+        handle = StackDepotResolver.encode_handle(pool_index=0, offset=0x100, extra=1)
+        pool_index, offset, extra = stack_depot_resolver._parse_handle(handle)
+
+        assert pool_index == 0
+        assert offset == 0x100
+        assert extra == 1
+
+    def test_encode_decode_symmetry(self, stack_depot_resolver):
+        """인코딩/디코딩 대칭성."""
+        test_cases = [
+            (0, 0x100, 0),
+            (10, 0x200, 0),
+            (100, 0x400, 1),
+            (0, 0x3FF0, 0),  # 최대 offset (10비트 * 16)
+        ]
+
+        for orig_pool, orig_offset, orig_extra in test_cases:
+            handle = StackDepotResolver.encode_handle(orig_pool, orig_offset, orig_extra)
+            pool_index, offset, extra = stack_depot_resolver._parse_handle(handle)
+
+            assert pool_index == orig_pool, f"pool mismatch for {orig_pool}"
+            assert offset == orig_offset, f"offset mismatch for {orig_offset}"
+            assert extra == orig_extra, f"extra mismatch for {orig_extra}"

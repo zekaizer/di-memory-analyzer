@@ -269,14 +269,17 @@ class MockDIBackend:
             },
         )
 
-        # struct stack_record 등록 (stack depot)
+        # struct stack_record 등록 (stack depot, Linux 6.12+)
+        # Layout: hash_list(16) + hash(4) + size(4) + handle(4) + count(4) + entries[]
         self._structs["struct stack_record"] = (
             ctypes.sizeof(MockStackRecord),
             {
                 "hash_list": 0,  # struct list_head (16 bytes)
                 "hash": 16,
                 "size": 20,
-                "entries": 24,  # variable-length array starts here
+                "handle": 24,  # union handle_parts (4 bytes)
+                "count": 28,  # refcount_t (4 bytes)
+                "entries": 32,  # variable-length array starts here
             },
         )
 
