@@ -52,6 +52,8 @@ class AddressTranslator:
 
         Linux 커널의 vmemmap 모델 기준:
         page = vmemmap_base + pfn * sizeof(struct page)
+
+        반환된 구조체에는 ._base 속성으로 원본 주소가 저장됨 (backend에서 설정).
         """
         vmemmap_base = self._get_vmemmap_base()
         page_size = self._get_page_struct_size()
@@ -69,12 +71,35 @@ class AddressTranslator:
         return (page_addr - vmemmap_base) // page_size
 
     def virt_to_page(self, vaddr: int) -> ctypes.Structure | None:
-        """가상 주소를 struct page로 변환."""
+        """
+        가상 주소를 struct page로 변환.
+
+        반환된 구조체에는 ._base 속성으로 원본 주소가 저장됨 (backend에서 설정).
+        """
         paddr = self.virt_to_phys(vaddr)
         if paddr is None:
             return None
         pfn = self.phys_to_pfn(paddr)
         return self.pfn_to_page(pfn)
+
+    # =========================================================================
+    # Page 관련 상수 (Properties)
+    # =========================================================================
+
+    @property
+    def page_shift(self) -> int:
+        """PAGE_SHIFT (CONFIG_PAGE_SHIFT, 기본값 12)."""
+        return self._get_page_shift()
+
+    @property
+    def page_size(self) -> int:
+        """PAGE_SIZE (1 << PAGE_SHIFT)."""
+        return 1 << self.page_shift
+
+    @property
+    def page_mask(self) -> int:
+        """PAGE_MASK (~(PAGE_SIZE - 1))."""
+        return ~(self.page_size - 1)
 
     # =========================================================================
     # 유효성 검사
