@@ -12,6 +12,7 @@ Page, SLUB, KASAN, Folio 서브시스템 분석 및 메모리 corruption 탐지 
 - ruff (linter/formatter)
 - ctypes (커널 구조체 접근)
 - DINotebookWrapper (DI 환경 인터페이스)
+- Linux Kernel 6.12+
 
 ## 설계 원칙
 
