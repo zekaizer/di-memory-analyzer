@@ -24,7 +24,6 @@ from di_memory.utils.constants import (
 if TYPE_CHECKING:
     import ctypes
 
-    from di_memory.analyzers.slub import SlubAnalyzer
     from di_memory.backend.protocol import DIBackend
     from di_memory.core.address_translator import AddressTranslator
     from di_memory.core.kernel_resolver import KernelResolver
@@ -64,7 +63,6 @@ class KasanAnalyzer(BaseAnalyzer):
         structs: StructHelper,
         addr: AddressTranslator,
         symbols: KernelResolver,
-        slub: SlubAnalyzer | None = None,
     ) -> None:
         """
         KasanAnalyzer 초기화.
@@ -74,10 +72,8 @@ class KasanAnalyzer(BaseAnalyzer):
             structs: StructHelper 인스턴스
             addr: AddressTranslator 인스턴스
             symbols: KernelResolver 인스턴스
-            slub: SlubAnalyzer 인스턴스 (선택적, SLUB 연동용)
         """
         super().__init__(backend, structs, addr, symbols)
-        self._slub = slub
         self._shadow_offset: int | None = None
         self._stack_depot: StackDepotResolver | None = None
 
@@ -649,55 +645,6 @@ class KasanAnalyzer(BaseAnalyzer):
             return KASAN_BUG_OUT_OF_BOUNDS
         else:
             return KASAN_BUG_TAG_MISMATCH
-
-    def analyze_fault(self, fault_addr: int, access_size: int = 8) -> dict:
-        """Fault 상세 분석.
-
-        Args:
-            fault_addr: Fault 발생 주소
-            access_size: 접근 크기
-
-        Returns:
-            dict: 상세 분석 결과
-        """
-        ptr_tag = self.get_tag(fault_addr)
-        untagged = self.reset_tag(fault_addr)
-        mem_tag = self.get_mem_tag(untagged)
-        bug_type = self.classify_bug_type(ptr_tag, mem_tag)
-
-        result = {
-            "fault_addr": fault_addr,
-            "untagged_addr": untagged,
-            "access_size": access_size,
-            "ptr_tag": ptr_tag,
-            "mem_tag": mem_tag,
-            "bug_type": bug_type,
-        }
-
-        # Object 경계 추정
-        bounds = self.find_object_bounds(untagged)
-        if bounds:
-            result["object_bounds"] = {"start": bounds[0], "end": bounds[1]}
-
-        # SLUB 연동
-        if self._slub is not None:
-            cache_info = self._slub.find_owning_cache(untagged)
-            if cache_info:
-                cache, slab, aligned_obj, idx = cache_info
-                result["cache_name"] = self._slub.get_cache_name(cache)
-                result["object_addr"] = aligned_obj
-                result["object_index"] = idx
-
-                # Track 정보
-                alloc_track = self.get_alloc_track(cache, aligned_obj)
-                if alloc_track:
-                    result["alloc_track"] = alloc_track
-
-                free_track = self.get_free_track(cache, aligned_obj)
-                if free_track and free_track["stack"]:
-                    result["free_track"] = free_track
-
-        return result
 
     # =========================================================================
     # 출력/포맷팅

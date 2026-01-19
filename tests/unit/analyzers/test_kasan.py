@@ -409,17 +409,6 @@ class TestKasanAnalyzerCorruption:
         bug = kasan_analyzer.classify_bug_type(0x42, 0x43)
         assert bug == "tag-mismatch"
 
-    def test_analyze_fault(self, kasan_analyzer, kasan_mock_backend, setup_shadow_tags):
-        """Fault 분석."""
-        base = setup_shadow_tags["base"]
-        freed_addr = base + 144
-        ptr = kasan_analyzer.set_tag(freed_addr, 0x42)
-
-        result = kasan_analyzer.analyze_fault(ptr, 8)
-        assert result["ptr_tag"] == 0x42
-        assert result["mem_tag"] == 0xFE
-        assert result["bug_type"] == "use-after-free"
-
 
 # =============================================================================
 # 출력/포맷팅 테스트
