@@ -150,11 +150,19 @@ class SlubAnalyzer(BaseAnalyzer):
         paddr = self._addr.pfn_to_phys(pfn)
         return self._addr.phys_to_virt(paddr)
 
+    @property
+    def nr_node_ids(self) -> int:
+        """NUMA node 수 (nr_node_ids 또는 기본값 1)."""
+        addr = self._symbols.to_addr("nr_node_ids")
+        if addr is not None:
+            return self._backend.read_u32(addr)
+        return 1  # UMA 시스템
+
     def iter_partial_slabs(self, cache: ctypes.Structure) -> Iterator[ctypes.Structure]:
         """
         Cache의 partial slab 리스트 순회.
 
-        per-node partial 리스트를 순회.
+        모든 NUMA node의 partial 리스트를 순회.
 
         Args:
             cache: struct kmem_cache
@@ -162,24 +170,26 @@ class SlubAnalyzer(BaseAnalyzer):
         Yields:
             struct slab
         """
-        # 간단 구현: node[0]의 partial 리스트만 순회
-        # 실제로는 모든 node를 순회해야 함
         if not self._backend.has_member("struct kmem_cache", "node"):
             return
 
-        node_ptr = self._backend.read_pointer(
-            cache._base + self._backend.offsetof("struct kmem_cache", "node")
+        node_array_addr = cache._base + self._backend.offsetof(
+            "struct kmem_cache", "node"
         )
-        if node_ptr == 0:
-            return
-
-        node = self._structs.read(node_ptr, "struct kmem_cache_node")
         partial_offset = self._backend.offsetof("struct kmem_cache_node", "partial")
-        partial_head = node._base + partial_offset
+        ptr_size = 8  # 64-bit pointer
 
-        yield from self._structs.list_for_each_entry(
-            partial_head, "struct slab", "slab_list"
-        )
+        for nid in range(self.nr_node_ids):
+            node_ptr = self._backend.read_pointer(node_array_addr + nid * ptr_size)
+            if node_ptr == 0:
+                continue
+
+            node = self._structs.read(node_ptr, "struct kmem_cache_node")
+            partial_head = node._base + partial_offset
+
+            yield from self._structs.list_for_each_entry(
+                partial_head, "struct slab", "slab_list"
+            )
 
     def iter_slabs(self, cache: ctypes.Structure) -> Iterator[ctypes.Structure]:
         """
@@ -199,11 +209,21 @@ class SlubAnalyzer(BaseAnalyzer):
             if slab is not None:
                 yield slab
 
+    @property
+    def nr_cpu_ids(self) -> int:
+        """CPU 수 (nr_cpu_ids 또는 기본값 1)."""
+        addr = self._symbols.to_addr("nr_cpu_ids")
+        if addr is not None:
+            return self._backend.read_u32(addr)
+        return 1
+
     def iter_cpu_slabs(
         self, cache: ctypes.Structure
     ) -> Iterator[tuple[int, ctypes.Structure | None]]:
         """
         Per-CPU slab 순회.
+
+        모든 CPU의 현재 slab을 순회.
 
         Args:
             cache: struct kmem_cache
@@ -211,17 +231,16 @@ class SlubAnalyzer(BaseAnalyzer):
         Yields:
             (cpu_id, struct slab or None) 튜플
         """
-        # 간단 구현: CPU 0만 순회
-        # 실제로는 nr_cpu_ids 만큼 순회해야 함
-        cpu_slab_addr = self._backend.per_cpu(cache.cpu_slab, 0)
-        cpu_slab = self._structs.read(cpu_slab_addr, "struct kmem_cache_cpu")
+        for cpu_id in range(self.nr_cpu_ids):
+            cpu_slab_addr = self._backend.per_cpu(cache.cpu_slab, cpu_id)
+            cpu_slab = self._structs.read(cpu_slab_addr, "struct kmem_cache_cpu")
 
-        slab_addr = cpu_slab.slab
-        if slab_addr != 0:
-            slab = self._structs.read(slab_addr, "struct slab")
-            yield (0, slab)
-        else:
-            yield (0, None)
+            slab_addr = cpu_slab.slab
+            if slab_addr != 0:
+                slab = self._structs.read(slab_addr, "struct slab")
+                yield (cpu_id, slab)
+            else:
+                yield (cpu_id, None)
 
     # =========================================================================
     # Object 관련
@@ -315,7 +334,7 @@ class SlubAnalyzer(BaseAnalyzer):
         Returns:
             free 여부
         """
-        return obj_addr in set(self.iter_free_objects(slab))
+        return any(free_obj == obj_addr for free_obj in self.iter_free_objects(slab))
 
     def get_object_index(self, slab: ctypes.Structure, obj_addr: int) -> int | None:
         """
@@ -700,22 +719,25 @@ class SlubAnalyzer(BaseAnalyzer):
             "random": cache.random if self.is_hardened else None,
         }
 
-    def get_slab_info(self, slab: ctypes.Structure) -> dict:
+    def get_slab_info(self, slab: ctypes.Structure, validate: bool = False) -> dict:
         """
         Slab 기본 정보.
 
         Args:
             slab: struct slab
+            validate: freelist 검증 수행 여부 (기본 False, 성능 고려)
 
         Returns:
             slab 정보 dict
         """
-        validation = self.validate_freelist(slab)
-        return {
+        info = {
             "address": slab._base,
             "virt_addr": self.slab_to_virt(slab),
             "objects": slab.objects,
             "inuse": slab.inuse,
             "frozen": bool(slab.frozen),
-            "freelist_valid": validation["valid"],
         }
+        if validate:
+            validation = self.validate_freelist(slab)
+            info["freelist_valid"] = validation["valid"]
+        return info
