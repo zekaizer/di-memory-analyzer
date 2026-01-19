@@ -266,31 +266,31 @@ class PageAnalyzer(BaseAnalyzer):
     # 주소 유틸
     # =========================================================================
 
-    def page_to_virt(self, page: ctypes.Structure) -> int:
+    def page_to_virt(self, page_addr: int) -> int:
         """
-        struct page를 가상 주소로 변환.
+        struct page 주소를 가상 주소로 변환.
 
         Args:
-            page: struct page
+            page_addr: struct page 주소
 
         Returns:
             가상 주소
         """
-        pfn = self._addr.page_to_pfn(page)
+        pfn = self._addr.page_to_pfn(page_addr)
         paddr = self._addr.pfn_to_phys(pfn)
         return self._addr.phys_to_virt(paddr)
 
-    def page_to_pfn(self, page: ctypes.Structure) -> int:
+    def page_to_pfn(self, page_addr: int) -> int:
         """
-        struct page를 PFN으로 변환.
+        struct page 주소를 PFN으로 변환.
 
         Args:
-            page: struct page
+            page_addr: struct page 주소
 
         Returns:
             PFN
         """
-        return self._addr.page_to_pfn(page)
+        return self._addr.page_to_pfn(page_addr)
 
     def get_page_aligned(self, addr: int) -> int:
         """
