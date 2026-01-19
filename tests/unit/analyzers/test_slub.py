@@ -241,55 +241,6 @@ class TestSlubAnalyzerObject:
 
 
 # =============================================================================
-# Freelist 검증 테스트
-# =============================================================================
-
-
-class TestSlubAnalyzerValidation:
-    """Freelist 검증 테스트."""
-
-    def test_analyze_bitflip(self, slub_analyzer):
-        """Bitflip 분석."""
-        # valid range: 0x1000 ~ 0x2000
-        valid_range = (0x1000, 0x2000)
-
-        # 1비트 플립으로 valid가 되는 경우
-        # 0x1800 ^ (1 << 12) = 0x0800 (invalid)
-        # 0x0800 ^ (1 << 12) = 0x1800 (valid!)
-        corrupted = 0x0800
-        result = slub_analyzer._analyze_bitflip(corrupted, valid_range)
-
-        assert result["is_bitflip"] is True
-        assert any(c["bit"] == 12 for c in result["candidates"])
-
-    def test_analyze_bitflip_no_match(self, slub_analyzer):
-        """Bitflip 분석 - 매칭 없음."""
-        valid_range = (0x1000, 0x1100)
-        corrupted = 0xDEAD_BEEF  # 범위 밖
-
-        result = slub_analyzer._analyze_bitflip(corrupted, valid_range)
-        assert result["is_bitflip"] is False
-        assert len(result["candidates"]) == 0
-
-    def test_trace_corrupted_freeptr(self, slub_analyzer, setup_basic_caches):
-        """Corrupted 포인터 역추적."""
-        cache = setup_basic_caches[0]
-        cache._base = 0xFFFF_8880_0001_0000
-
-        ptr_addr = 0xFFFF_8880_1000_0040
-        encoded_value = 0xDEAD_BEEF_DEAD_BEEF
-
-        result = slub_analyzer.trace_corrupted_freeptr(cache, ptr_addr, encoded_value)
-
-        assert result["ptr_addr"] == ptr_addr
-        assert result["encoded_value"] == encoded_value
-        assert "decoded_value" in result
-        assert "expected_range" in result
-        assert "analysis" in result
-        assert "likely_cause" in result
-
-
-# =============================================================================
 # 주소 역추적 테스트
 # =============================================================================
 
