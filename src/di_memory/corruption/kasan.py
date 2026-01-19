@@ -58,7 +58,7 @@ class KasanFaultAnalyzer:
         ptr_tag = self._kasan.get_tag(fault_addr)
         untagged = self._kasan.reset_tag(fault_addr)
         mem_tag = self._kasan.get_mem_tag(untagged)
-        bug_type = self._kasan.classify_bug_type(ptr_tag, mem_tag)
+        bug_type = self._kasan.classify_bug_type(mem_tag)
 
         result: dict = {
             "fault_addr": fault_addr,
@@ -129,7 +129,7 @@ class KasanFaultAnalyzer:
             ]
         """
         untagged = self._kasan.reset_tag(addr)
-        start = untagged - search_range
+        start = max(0, untagged - search_range)
         end = untagged + search_range
 
         objects: list[dict] = []

@@ -396,17 +396,17 @@ class TestKasanAnalyzerCorruption:
 
     def test_classify_bug_type_uaf(self, kasan_analyzer):
         """UAF 버그 분류."""
-        bug = kasan_analyzer.classify_bug_type(0x42, 0xFE)
+        bug = kasan_analyzer.classify_bug_type(0xFE)
         assert bug == "use-after-free"
 
     def test_classify_bug_type_oob(self, kasan_analyzer):
         """OOB 버그 분류."""
-        bug = kasan_analyzer.classify_bug_type(0x42, 0xFF)
+        bug = kasan_analyzer.classify_bug_type(0xFF)
         assert bug == "out-of-bounds"
 
     def test_classify_bug_type_mismatch(self, kasan_analyzer):
         """Tag mismatch 버그 분류."""
-        bug = kasan_analyzer.classify_bug_type(0x42, 0x43)
+        bug = kasan_analyzer.classify_bug_type(0x43)
         assert bug == "tag-mismatch"
 
 

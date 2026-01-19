@@ -476,7 +476,7 @@ class KasanAnalyzer(BaseAnalyzer):
                 start = search_addr
                 search_addr -= self.GRANULE_SIZE
                 searched += self.GRANULE_SIZE
-            except Exception:
+            except (ValueError, OSError):
                 break
 
         # 뒤로 검색
@@ -492,7 +492,7 @@ class KasanAnalyzer(BaseAnalyzer):
                 end = search_addr + self.GRANULE_SIZE
                 search_addr += self.GRANULE_SIZE
                 searched += self.GRANULE_SIZE
-            except Exception:
+            except (ValueError, OSError):
                 break
 
         return start, end
@@ -514,6 +514,9 @@ class KasanAnalyzer(BaseAnalyzer):
             struct kasan_alloc_meta 또는 None
         """
         if not self._structs.has_member("struct kmem_cache", "kasan_info"):
+            return None
+
+        if not self._structs.has_member("struct kasan_cache", "alloc_meta_offset"):
             return None
 
         kasan_info_offset = self._structs.offsetof("struct kmem_cache", "kasan_info")
@@ -628,11 +631,10 @@ class KasanAnalyzer(BaseAnalyzer):
             "mismatches": mismatches,
         }
 
-    def classify_bug_type(self, ptr_tag: int, mem_tag: int) -> str:
+    def classify_bug_type(self, mem_tag: int) -> str:
         """버그 유형 분류.
 
         Args:
-            ptr_tag: 포인터 태그
             mem_tag: 메모리 태그
 
         Returns:
