@@ -169,9 +169,33 @@ class SlubAnalyzer(BaseAnalyzer):
         """
         return self._structs.read(page._base, "struct slab")
 
+    def get_slab_by_addr(self, addr: int) -> ctypes.Structure | None:
+        """
+        주소로 slab 구조체 조회.
+
+        Args:
+            addr: slab 구조체 주소
+
+        Returns:
+            struct slab 또는 None (읽기 실패 시)
+        """
+        return self._structs.read(addr, "struct slab")
+
     def _get_slab_cache(self, slab: ctypes.Structure) -> ctypes.Structure:
         """Slab이 속한 kmem_cache 반환."""
         return self._structs.read(slab.slab_cache, "struct kmem_cache")
+
+    def get_slab_cache(self, slab: ctypes.Structure) -> ctypes.Structure:
+        """
+        Slab이 속한 kmem_cache 조회.
+
+        Args:
+            slab: struct slab
+
+        Returns:
+            struct kmem_cache
+        """
+        return self._get_slab_cache(slab)
 
     def slab_to_virt(self, slab: ctypes.Structure) -> int:
         """
@@ -613,9 +637,7 @@ class SlubAnalyzer(BaseAnalyzer):
         track_size = self._get_track_size()
         return info_end + track_item * track_size
 
-    def get_alloc_track(
-        self, cache: ctypes.Structure, obj_addr: int
-    ) -> dict | None:
+    def get_alloc_track(self, cache: ctypes.Structure, obj_addr: int) -> dict | None:
         """
         Object의 할당 추적 정보.
 
@@ -637,9 +659,7 @@ class SlubAnalyzer(BaseAnalyzer):
             return None
         return self._read_track(cache, obj_addr, 0)  # TRACK_ALLOC
 
-    def get_free_track(
-        self, cache: ctypes.Structure, obj_addr: int
-    ) -> dict | None:
+    def get_free_track(self, cache: ctypes.Structure, obj_addr: int) -> dict | None:
         """
         Object의 해제 추적 정보.
 
@@ -657,9 +677,7 @@ class SlubAnalyzer(BaseAnalyzer):
             return None
         return self._read_track(cache, obj_addr, 1)  # TRACK_FREE
 
-    def get_object_tracks(
-        self, cache: ctypes.Structure, obj_addr: int
-    ) -> dict:
+    def get_object_tracks(self, cache: ctypes.Structure, obj_addr: int) -> dict:
         """
         Object의 alloc/free 추적 정보 모두 반환.
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from di_memory.corruption.helpers import check_object_state_consistency
+
 if TYPE_CHECKING:
     from di_memory.analyzers.kasan import KasanAnalyzer
     from di_memory.analyzers.slub import SlubAnalyzer
@@ -390,19 +392,23 @@ class KasanFaultAnalyzer:
 
                 if alloc_track:
                     result["alloc_track"] = alloc_track
-                    result["timeline"].append({
-                        "event": "alloc",
-                        "pid": alloc_track.get("pid"),
-                        "stack": alloc_track.get("stack", []),
-                    })
+                    result["timeline"].append(
+                        {
+                            "event": "alloc",
+                            "pid": alloc_track.get("pid"),
+                            "stack": alloc_track.get("stack", []),
+                        }
+                    )
 
                 if free_track and free_track.get("stack"):
                     result["free_track"] = free_track
-                    result["timeline"].append({
-                        "event": "free",
-                        "pid": free_track.get("pid"),
-                        "stack": free_track.get("stack", []),
-                    })
+                    result["timeline"].append(
+                        {
+                            "event": "free",
+                            "pid": free_track.get("pid"),
+                            "stack": free_track.get("stack", []),
+                        }
+                    )
 
                 # Freelist 상태 확인
                 is_in_freelist = self._slub.is_object_free(slab, aligned_obj)
@@ -517,29 +523,34 @@ class KasanFaultAnalyzer:
                 consecutive_invalid += 1
             else:
                 if consecutive_invalid > 8:  # 8 granule = 128 bytes 이상
-                    anomalies.append({
-                        "type": "mass_free",
-                        "start": invalid_start,
-                        "granules": consecutive_invalid,
-                        "size": consecutive_invalid * granule_size,
-                    })
+                    anomalies.append(
+                        {
+                            "type": "mass_free",
+                            "start": invalid_start,
+                            "granules": consecutive_invalid,
+                            "size": consecutive_invalid * granule_size,
+                        }
+                    )
                 consecutive_invalid = 0
                 invalid_start = None
 
         # 마지막 검사
         if consecutive_invalid > 8:
-            anomalies.append({
-                "type": "mass_free",
-                "start": invalid_start,
-                "granules": consecutive_invalid,
-                "size": consecutive_invalid * granule_size,
-            })
+            anomalies.append(
+                {
+                    "type": "mass_free",
+                    "start": invalid_start,
+                    "granules": consecutive_invalid,
+                    "size": consecutive_invalid * granule_size,
+                }
+            )
 
         # 2. 동일 태그 반복 (heap spray)
         if expected_tag is None and tag_distribution:
             # 가장 흔한 태그 찾기 (INVALID, KERNEL 제외)
             valid_tags = {
-                k: v for k, v in tag_distribution.items()
+                k: v
+                for k, v in tag_distribution.items()
                 if k not in (self._kasan.TAG_INVALID, self._kasan.TAG_KERNEL)
             }
             if valid_tags:
@@ -548,28 +559,38 @@ class KasanFaultAnalyzer:
         if expected_tag is not None:
             expected_count = tag_distribution.get(expected_tag, 0)
             if expected_count > total_granules * 0.8:  # 80% 이상 동일 태그
-                anomalies.append({
-                    "type": "heap_spray",
-                    "dominant_tag": expected_tag,
-                    "coverage": expected_count / total_granules,
-                    "granules": expected_count,
-                })
+                anomalies.append(
+                    {
+                        "type": "heap_spray",
+                        "dominant_tag": expected_tag,
+                        "coverage": expected_count / total_granules,
+                        "granules": expected_count,
+                    }
+                )
 
         # 3. 이상한 태그 값 (메모리 오염)
         for tag, count in tag_distribution.items():
             # 일반적이지 않은 태그 패턴
             if 0xF0 <= tag < 0xFE and tag != self._kasan.TAG_INVALID:
-                anomalies.append({
-                    "type": "unusual_tag",
-                    "tag": tag,
-                    "count": count,
-                })
+                anomalies.append(
+                    {
+                        "type": "unusual_tag",
+                        "tag": tag,
+                        "count": count,
+                    }
+                )
 
         # Corruption 지표
-        invalid_ratio = tag_distribution.get(self._kasan.TAG_INVALID, 0) / max(1, total_granules)
-        unique_tags = len([t for t in tag_distribution if t not in (
-            self._kasan.TAG_INVALID, self._kasan.TAG_KERNEL
-        )])
+        invalid_ratio = tag_distribution.get(self._kasan.TAG_INVALID, 0) / max(
+            1, total_granules
+        )
+        unique_tags = len(
+            [
+                t
+                for t in tag_distribution
+                if t not in (self._kasan.TAG_INVALID, self._kasan.TAG_KERNEL)
+            ]
+        )
 
         return {
             "start": aligned_start,
@@ -607,11 +628,11 @@ class KasanFaultAnalyzer:
         corrupted: list[dict] = []
 
         # slab 구조체 읽기
-        slab = self._slub._structs.read(slab_addr, "struct slab")
+        slab = self._slub.get_slab_by_addr(slab_addr)
         if slab is None:
             return []
 
-        cache = self._slub._get_slab_cache(slab)
+        cache = self._slub.get_slab_cache(slab)
         base = self._slub.slab_to_virt(slab)
         obj_size = cache.size
 
@@ -620,35 +641,46 @@ class KasanFaultAnalyzer:
             is_free = self._slub.is_object_free(slab, obj_addr)
             mem_tag = self._kasan.get_mem_tag(obj_addr)
 
-            # 불일치 검사
-            if is_free and mem_tag != self._kasan.TAG_INVALID:
-                corrupted.append({
-                    "object_addr": obj_addr,
-                    "index": idx,
-                    "issue": "freed_with_valid_tag",
-                    "expected_tag": self._kasan.TAG_INVALID,
-                    "actual_tag": mem_tag,
-                    "details": f"Object is free but has tag 0x{mem_tag:02x}",
-                })
-            elif not is_free and mem_tag == self._kasan.TAG_INVALID:
-                corrupted.append({
-                    "object_addr": obj_addr,
-                    "index": idx,
-                    "issue": "allocated_with_invalid_tag",
-                    "expected_tag": "valid (not 0xFE)",
-                    "actual_tag": mem_tag,
-                    "details": "Object is allocated but has TAG_INVALID",
-                })
+            # 불일치 검사 (헬퍼 함수 사용)
+            is_consistent, error_type = check_object_state_consistency(
+                is_free, mem_tag, self._kasan
+            )
+
+            if not is_consistent and error_type:
+                if error_type == "freed_but_valid_tag":
+                    corrupted.append(
+                        {
+                            "object_addr": obj_addr,
+                            "index": idx,
+                            "issue": "freed_with_valid_tag",
+                            "expected_tag": self._kasan.TAG_INVALID,
+                            "actual_tag": mem_tag,
+                            "details": f"Object is free but has tag 0x{mem_tag:02x}",
+                        }
+                    )
+                elif error_type == "allocated_but_invalid_tag":
+                    corrupted.append(
+                        {
+                            "object_addr": obj_addr,
+                            "index": idx,
+                            "issue": "allocated_with_invalid_tag",
+                            "expected_tag": "valid (not 0xFE)",
+                            "actual_tag": mem_tag,
+                            "details": "Object is allocated but has TAG_INVALID",
+                        }
+                    )
 
             # Redzone 검사
             redzone = self.analyze_redzone(obj_addr, obj_size)
             if not redzone["valid"]:
-                corrupted.append({
-                    "object_addr": obj_addr,
-                    "index": idx,
-                    "issue": f"redzone_{redzone['corruption_type']}",
-                    "corrupted_granules": redzone["corrupted_granules"],
-                    "details": f"Redzone corruption: {redzone['corruption_type']}",
-                })
+                corrupted.append(
+                    {
+                        "object_addr": obj_addr,
+                        "index": idx,
+                        "issue": f"redzone_{redzone['corruption_type']}",
+                        "corrupted_granules": redzone["corrupted_granules"],
+                        "details": f"Redzone corruption: {redzone['corruption_type']}",
+                    }
+                )
 
         return corrupted

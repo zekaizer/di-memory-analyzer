@@ -6,6 +6,10 @@ import ctypes
 from typing import TYPE_CHECKING
 
 from di_memory.corruption.bitflip import BitflipAnalyzer
+from di_memory.corruption.helpers import (
+    check_object_state_consistency,
+    format_state_error,
+)
 
 if TYPE_CHECKING:
     from di_memory.analyzers.kasan import KasanAnalyzer
@@ -48,7 +52,7 @@ class FreelistCorruptionDetector:
                 "errors": list[dict],
             }
         """
-        cache = self._slub._get_slab_cache(slab)
+        cache = self._slub.get_slab_cache(slab)
         fp_offset = cache.offset
 
         freelist_offset = self._slub._backend.offsetof("struct slab", "freelist")
@@ -284,7 +288,7 @@ class FreelistCorruptionDetector:
                 "consistency": {"checked": False},
             }
 
-        cache = self._slub._get_slab_cache(slab)
+        cache = self._slub.get_slab_cache(slab)
         base = self._slub.slab_to_virt(slab)
         obj_size = cache.size
 
@@ -299,28 +303,20 @@ class FreelistCorruptionDetector:
             obj_addr = base + idx * obj_size
             is_in_freelist = obj_addr in free_objects
             mem_tag = self._kasan.get_mem_tag(obj_addr)
-            is_invalid_tag = mem_tag == self._kasan.TAG_INVALID
 
-            if is_in_freelist and not is_invalid_tag:
-                # Freelist에 있는데 KASAN은 valid로 표시
-                freed_but_valid_tag += 1
-                kasan_errors.append({
-                    "type": "freed_but_valid_tag",
-                    "object_addr": obj_addr,
-                    "object_index": idx,
-                    "mem_tag": mem_tag,
-                    "details": f"Object in freelist but tag 0x{mem_tag:02x} != 0xFE",
-                })
-            elif not is_in_freelist and is_invalid_tag:
-                # Freelist에 없는데 KASAN은 invalid로 표시
-                allocated_but_invalid_tag += 1
-                kasan_errors.append({
-                    "type": "allocated_but_invalid_tag",
-                    "object_addr": obj_addr,
-                    "object_index": idx,
-                    "mem_tag": mem_tag,
-                    "details": "Object allocated but has TAG_INVALID",
-                })
+            is_consistent, error_type = check_object_state_consistency(
+                is_in_freelist, mem_tag, self._kasan
+            )
+
+            if not is_consistent and error_type:
+                if error_type == "freed_but_valid_tag":
+                    freed_but_valid_tag += 1
+                elif error_type == "allocated_but_invalid_tag":
+                    allocated_but_invalid_tag += 1
+
+                kasan_errors.append(
+                    format_state_error(error_type, obj_addr, idx, mem_tag)
+                )
 
         valid = freelist_result["valid"] and len(kasan_errors) == 0
 
@@ -347,7 +343,7 @@ class FreelistCorruptionDetector:
         Returns:
             free object 주소 집합
         """
-        cache = self._slub._get_slab_cache(slab)
+        cache = self._slub.get_slab_cache(slab)
         fp_offset = cache.offset
 
         freelist_offset = self._slub._backend.offsetof("struct slab", "freelist")
@@ -385,7 +381,7 @@ class FreelistCorruptionDetector:
         Returns:
             list[dict]: [{object_addr, count, details}, ...]
         """
-        cache = self._slub._get_slab_cache(slab)
+        cache = self._slub.get_slab_cache(slab)
         fp_offset = cache.offset
 
         freelist_offset = self._slub._backend.offsetof("struct slab", "freelist")

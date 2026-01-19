@@ -196,28 +196,36 @@ class CorruptionDetector:
 
         for cause in causes:
             if cause == "use_after_free":
-                recommendations.extend([
-                    "Check object lifecycle management",
-                    "Review free_track for deallocation point",
-                    "Look for dangling pointer usage",
-                ])
+                recommendations.extend(
+                    [
+                        "Check object lifecycle management",
+                        "Review free_track for deallocation point",
+                        "Look for dangling pointer usage",
+                    ]
+                )
             elif cause == "out_of_bounds":
-                recommendations.extend([
-                    "Check array/buffer bounds",
-                    "Review loop conditions",
-                    "Verify size calculations",
-                ])
+                recommendations.extend(
+                    [
+                        "Check array/buffer bounds",
+                        "Review loop conditions",
+                        "Verify size calculations",
+                    ]
+                )
             elif cause == "freelist_corruption":
-                recommendations.extend([
-                    "Check for heap overflow",
-                    "Review adjacent object writes",
-                    "Consider memory corruption from other subsystem",
-                ])
+                recommendations.extend(
+                    [
+                        "Check for heap overflow",
+                        "Review adjacent object writes",
+                        "Consider memory corruption from other subsystem",
+                    ]
+                )
             elif cause == "tag_mismatch":
-                recommendations.extend([
-                    "Verify pointer provenance",
-                    "Check for type confusion",
-                ])
+                recommendations.extend(
+                    [
+                        "Verify pointer provenance",
+                        "Check for type confusion",
+                    ]
+                )
 
         return list(dict.fromkeys(recommendations))  # 중복 제거
 
@@ -241,7 +249,7 @@ class CorruptionDetector:
                 "summary": dict,
             }
         """
-        slab = self._slub._structs.read(slab_addr, "struct slab")
+        slab = self._slub.get_slab_by_addr(slab_addr)
         if slab is None:
             return {"slab_addr": slab_addr, "error": "Failed to read slab"}
 
@@ -255,14 +263,16 @@ class CorruptionDetector:
 
         # Freelist 검증
         if self.kasan_enabled:
-            result["freelist_result"] = self._freelist.validate_freelist_with_kasan(slab)
+            result["freelist_result"] = self._freelist.validate_freelist_with_kasan(
+                slab
+            )
         else:
             result["freelist_result"] = self._freelist.validate_freelist(slab)
 
         # KASAN 기반 object 검사
         if self.kasan_enabled and self._kasan_fault:
-            result["corrupted_objects"] = self._kasan_fault.find_corrupted_objects_in_slab(
-                slab_addr
+            result["corrupted_objects"] = (
+                self._kasan_fault.find_corrupted_objects_in_slab(slab_addr)
             )
 
         # Double-free 검사
@@ -281,7 +291,10 @@ class CorruptionDetector:
             "kasan_errors": kasan_errors,
             "corrupted_objects": corrupted_count,
             "double_frees": double_free_count,
-            "total_issues": (0 if freelist_valid else 1) + kasan_errors + corrupted_count + double_free_count,
+            "total_issues": (0 if freelist_valid else 1)
+            + kasan_errors
+            + corrupted_count
+            + double_free_count,
         }
 
         return result
@@ -323,15 +336,18 @@ class CorruptionDetector:
             slab_result = self.scan_slab(slab._base)
             if slab_result["summary"].get("total_issues", 0) > 0:
                 result["corrupted_slabs"] += 1
-                result["issues"].append({
-                    "slab_addr": slab._base,
-                    "summary": slab_result["summary"],
-                })
+                result["issues"].append(
+                    {
+                        "slab_addr": slab._base,
+                        "summary": slab_result["summary"],
+                    }
+                )
 
         result["summary"] = {
             "total_slabs": result["total_slabs"],
             "corrupted_slabs": result["corrupted_slabs"],
-            "corruption_rate": result["corrupted_slabs"] / max(1, result["total_slabs"]),
+            "corruption_rate": result["corrupted_slabs"]
+            / max(1, result["total_slabs"]),
         }
 
         return result
@@ -368,16 +384,21 @@ class CorruptionDetector:
             if cache_result.get("corrupted_slabs", 0) > 0:
                 result["corrupted_caches"] += 1
 
-            result["cache_results"].append({
-                "cache_name": cache_name,
-                "corrupted_slabs": cache_result.get("corrupted_slabs", 0),
-                "kasan_inconsistent": cache_result.get("kasan_inconsistent_slabs", 0),
-            })
+            result["cache_results"].append(
+                {
+                    "cache_name": cache_name,
+                    "corrupted_slabs": cache_result.get("corrupted_slabs", 0),
+                    "kasan_inconsistent": cache_result.get(
+                        "kasan_inconsistent_slabs", 0
+                    ),
+                }
+            )
 
         result["summary"] = {
             "total_caches": result["total_caches"],
             "corrupted_caches": result["corrupted_caches"],
-            "healthy_rate": (result["total_caches"] - result["corrupted_caches"]) / max(1, result["total_caches"]),
+            "healthy_rate": (result["total_caches"] - result["corrupted_caches"])
+            / max(1, result["total_caches"]),
         }
 
         return result

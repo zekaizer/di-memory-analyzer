@@ -163,3 +163,180 @@ class TestFreelistCorruptionDetectorEstimateCause:
         analysis = {"is_bitflip": False, "candidates": []}
         cause = freelist_detector._estimate_corruption_cause(0x1234_5678, analysis)
         assert cause == "unknown"
+
+
+# =============================================================================
+# KASAN 연동 테스트
+# =============================================================================
+
+
+@pytest.fixture
+def kasan_slub_backend():
+    """KASAN과 SLUB이 모두 설정된 backend."""
+    backend = MockDIBackend()
+    backend.setup_kasan_sw_tags()
+    return backend
+
+
+@pytest.fixture
+def kasan_slub_setup(kasan_slub_backend):
+    """KASAN + SLUB 통합 설정."""
+    from di_memory.analyzers.kasan import KasanAnalyzer
+    from di_memory.analyzers.slub import SlubAnalyzer
+    from di_memory.core.address_translator import AddressTranslator
+    from di_memory.core.kernel_resolver import KernelResolver
+    from di_memory.core.struct_helper import StructHelper
+
+    structs = StructHelper(kasan_slub_backend)
+    addr = AddressTranslator(kasan_slub_backend)
+    symbols = KernelResolver(kasan_slub_backend)
+
+    kasan = KasanAnalyzer(
+        backend=kasan_slub_backend, structs=structs, addr=addr, symbols=symbols
+    )
+    slub = SlubAnalyzer(
+        backend=kasan_slub_backend, structs=structs, addr=addr, symbols=symbols
+    )
+
+    return {"backend": kasan_slub_backend, "kasan": kasan, "slub": slub}
+
+
+@pytest.fixture
+def freelist_detector_with_kasan(kasan_slub_setup):
+    """KASAN 연동 FreelistCorruptionDetector."""
+    return FreelistCorruptionDetector(
+        kasan_slub_setup["slub"], kasan_slub_setup["kasan"]
+    )
+
+
+@pytest.fixture
+def setup_kasan_slab(kasan_slub_setup):
+    """KASAN 태그가 설정된 slab 환경."""
+    backend = kasan_slub_setup["backend"]
+    kasan = kasan_slub_setup["kasan"]
+
+    # Cache 설정
+    cache_addr = 0xFFFF_8880_0001_0000
+    cache = backend.register_kmem_cache(
+        addr=cache_addr,
+        name="test-cache",
+        object_size=64,
+        size=64,
+        offset=32,
+        random=0x1234_5678_9ABC_DEF0,
+    )
+    backend.link_caches([cache_addr])
+
+    # Slab 설정 (8 objects, 3 free)
+    slab_addr = 0xFFFF_EA00_0010_0000
+    slab = backend.register_slab(
+        addr=slab_addr,
+        cache_addr=cache_addr,
+        objects=8,
+        inuse=5,
+    )
+    slab._base = slab_addr
+
+    slab_virt_addr = 0xFFFF_8880_1000_0000
+
+    # Freelist 설정: indices 2, 5, 7 are free
+    backend.setup_freelist(
+        slab=slab,
+        cache=cache,
+        free_indices=[2, 5, 7],
+        slab_virt_addr=slab_virt_addr,
+        hardened=True,
+    )
+
+    # KASAN 태그 설정
+    obj_size = 64
+    for idx in range(8):
+        obj_addr = slab_virt_addr + idx * obj_size
+        if idx in [2, 5, 7]:  # free objects
+            backend.set_shadow_tags_range(obj_addr, obj_size, kasan.TAG_INVALID)
+        else:  # allocated objects
+            backend.set_shadow_tags_range(obj_addr, obj_size, 0x42)
+
+    return {
+        "cache": cache,
+        "cache_addr": cache_addr,
+        "slab": slab,
+        "slab_addr": slab_addr,
+        "slab_virt_addr": slab_virt_addr,
+        "free_indices": [2, 5, 7],
+        "allocated_indices": [0, 1, 3, 4, 6],
+    }
+
+
+class TestFreelistCorruptionDetectorKasanValidation:
+    """validate_freelist_with_kasan() 테스트."""
+
+    def test_validate_freelist_with_kasan_disabled(
+        self, freelist_detector, setup_slab_with_freelist
+    ):
+        """KASAN 비활성화 시 기본 검증만 수행."""
+        data = setup_slab_with_freelist
+        slab = data["slab"]
+        slab._base = data["slab_addr"]
+
+        # KASAN 없이 생성된 detector
+        result = freelist_detector.validate_freelist_with_kasan(slab)
+
+        assert "freelist_result" in result
+        assert result["kasan_errors"] == []
+        assert result["consistency"]["checked"] is False
+
+    def test_validate_freelist_with_kasan_returns_structure(
+        self, freelist_detector_with_kasan, kasan_slub_setup, setup_kasan_slab
+    ):
+        """validate_freelist_with_kasan 반환 구조 확인."""
+        data = setup_kasan_slab
+        slab = data["slab"]
+
+        result = freelist_detector_with_kasan.validate_freelist_with_kasan(slab)
+
+        # 반환 구조 확인
+        assert "valid" in result
+        assert "freelist_result" in result
+        assert "kasan_errors" in result
+        assert "consistency" in result
+        assert "checked" in result["consistency"]
+        assert result["consistency"]["checked"] is True
+
+
+class TestFreelistCorruptionDetectorDoubleFree:
+    """detect_double_free() 테스트."""
+
+    def test_detect_double_free_returns_list(
+        self, freelist_detector_with_kasan, setup_kasan_slab
+    ):
+        """detect_double_free 반환 형식 확인."""
+        data = setup_kasan_slab
+        slab = data["slab"]
+
+        result = freelist_detector_with_kasan.detect_double_free(slab)
+
+        # 리스트 반환
+        assert isinstance(result, list)
+
+
+class TestFreelistCorruptionDetectorCacheValidation:
+    """validate_cache_with_kasan() 테스트."""
+
+    def test_validate_cache_with_kasan_no_errors(
+        self, freelist_detector_with_kasan, kasan_slub_setup, setup_kasan_slab
+    ):
+        """에러 없는 cache 검증."""
+        data = setup_kasan_slab
+        cache = data["cache"]
+        cache._base = data["cache_addr"]
+
+        # iter_slabs가 동작하려면 추가 설정 필요
+        # 이 테스트는 기본 구조만 검증
+        result = freelist_detector_with_kasan.validate_cache_with_kasan(cache)
+
+        assert "cache_name" in result
+        assert "total_slabs" in result
+        assert "corrupted_slabs" in result
+        assert "kasan_inconsistent_slabs" in result
+        assert "errors" in result
