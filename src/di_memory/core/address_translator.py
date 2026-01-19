@@ -53,14 +53,12 @@ class AddressTranslator:
         Linux 커널의 vmemmap 모델 기준:
         page = vmemmap_base + pfn * sizeof(struct page)
 
-        반환된 구조체에는 ._base 속성으로 원본 주소가 저장됨.
+        반환된 구조체에는 ._base 속성으로 원본 주소가 저장됨 (backend에서 설정).
         """
         vmemmap_base = self._get_vmemmap_base()
         page_size = self._get_page_struct_size()
         page_addr = vmemmap_base + pfn * page_size
-        page = self._backend.read_type(page_addr, "struct page")
-        page._base = page_addr
-        return page
+        return self._backend.read_type(page_addr, "struct page")
 
     def page_to_pfn(self, page_addr: int) -> int:
         """
@@ -76,7 +74,7 @@ class AddressTranslator:
         """
         가상 주소를 struct page로 변환.
 
-        반환된 구조체에는 ._base 속성으로 원본 주소가 저장됨.
+        반환된 구조체에는 ._base 속성으로 원본 주소가 저장됨 (backend에서 설정).
         """
         paddr = self.virt_to_phys(vaddr)
         if paddr is None:

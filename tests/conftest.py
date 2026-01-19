@@ -133,19 +133,23 @@ class MockDIBackend:
     def read_type(
         self, addr: int | str, type_name: str | None = None
     ) -> ctypes.Structure | int:
+        original_addr = addr
         if isinstance(addr, str):
             resolved = self._symbols.get(addr)
             if resolved is None:
                 raise KeyError(f"Unknown symbol: {addr}")
-            addr = resolved
+            original_addr = resolved
 
         if type_name == "struct page":
             # 페이지 캐시에서 찾기
-            if addr in self._pages:
-                return self._pages[addr]
+            if original_addr in self._pages:
+                page = self._pages[original_addr]
+                page._base = original_addr
+                return page
             # 새 페이지 생성
             page = MockPage()
-            self._pages[addr] = page
+            page._base = original_addr
+            self._pages[original_addr] = page
             return page
 
         return 0
