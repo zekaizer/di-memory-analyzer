@@ -30,17 +30,17 @@ def setup_stack_depot(mock_backend: MockDIBackend):
     # pool[1] 포인터 설정 (NULL)
     mock_backend._memory[stack_pools_addr + 8] = (0).to_bytes(8, "little")
 
-    # Linux 6.12+ handle format:
-    # - bits 0-20:  pool_index_plus_1 (21 bits)
-    # - bits 21-30: offset (10 bits)
-    # - bit 31:     extra (1 bit)
+    # Linux 6.12+ handle format (PAGE_SHIFT=12 기준):
+    # - bits 0-16:  pool_index_plus_1 (17 bits)
+    # - bits 17-26: offset (10 bits)
+    # - bits 27-31: extra (5 bits)
     #
     # pool_index=0, offset=0x100 일 때:
     # - pool_index_plus_1 = 1
     # - offset_raw = 0x100 >> 4 = 0x10
-    # - handle = 1 | (0x10 << 21) = 0x02000001
+    # - handle = 1 | (0x10 << 17) = 0x00200001
     record_offset = 0x100
-    handle = StackDepotResolver.encode_handle(pool_index=0, offset=record_offset)
+    handle = StackDepotResolver.encode_handle_static(pool_index=0, offset=record_offset)
 
     record_addr = pool_0_addr + record_offset
 
@@ -141,7 +141,7 @@ class TestStackDepotResolverResolve:
         resolver = StackDepotResolver(mock_backend, kernel_resolver)
 
         # pool_index = 1 (NULL pool)
-        invalid_handle = StackDepotResolver.encode_handle(pool_index=1, offset=0x100)
+        invalid_handle = resolver.encode_handle(pool_index=1, offset=0x100)
         result = resolver.resolve_handle(invalid_handle)
 
         assert result == []
@@ -153,7 +153,7 @@ class TestStackDepotResolverParseHandle:
     def test_parse_handle_basic(self, stack_depot_resolver):
         """기본 핸들 파싱."""
         # pool_index=0, offset=0x100
-        handle = StackDepotResolver.encode_handle(pool_index=0, offset=0x100)
+        handle = stack_depot_resolver.encode_handle(pool_index=0, offset=0x100)
         pool_index, offset, extra = stack_depot_resolver._parse_handle(handle)
 
         assert pool_index == 0
@@ -163,7 +163,7 @@ class TestStackDepotResolverParseHandle:
     def test_parse_handle_with_pool_index(self, stack_depot_resolver):
         """pool index가 있는 핸들."""
         # pool_index=5, offset=0x200
-        handle = StackDepotResolver.encode_handle(pool_index=5, offset=0x200)
+        handle = stack_depot_resolver.encode_handle(pool_index=5, offset=0x200)
         pool_index, offset, extra = stack_depot_resolver._parse_handle(handle)
 
         assert pool_index == 5
@@ -171,28 +171,41 @@ class TestStackDepotResolverParseHandle:
         assert extra == 0
 
     def test_parse_handle_with_extra(self, stack_depot_resolver):
-        """extra 비트가 설정된 핸들."""
-        # pool_index=0, offset=0x100, extra=1
-        handle = StackDepotResolver.encode_handle(pool_index=0, offset=0x100, extra=1)
+        """extra 비트가 설정된 핸들 (5비트)."""
+        # pool_index=0, offset=0x100, extra=15 (Linux 6.12+에서 5비트)
+        handle = stack_depot_resolver.encode_handle(pool_index=0, offset=0x100, extra=15)
         pool_index, offset, extra = stack_depot_resolver._parse_handle(handle)
 
         assert pool_index == 0
         assert offset == 0x100
-        assert extra == 1
+        assert extra == 15
 
     def test_encode_decode_symmetry(self, stack_depot_resolver):
         """인코딩/디코딩 대칭성."""
         test_cases = [
             (0, 0x100, 0),
             (10, 0x200, 0),
-            (100, 0x400, 1),
+            (100, 0x400, 15),  # extra 최대값 (5비트) = 31
             (0, 0x3FF0, 0),  # 최대 offset (10비트 * 16)
         ]
 
         for orig_pool, orig_offset, orig_extra in test_cases:
-            handle = StackDepotResolver.encode_handle(orig_pool, orig_offset, orig_extra)
+            handle = stack_depot_resolver.encode_handle(orig_pool, orig_offset, orig_extra)
             pool_index, offset, extra = stack_depot_resolver._parse_handle(handle)
 
             assert pool_index == orig_pool, f"pool mismatch for {orig_pool}"
             assert offset == orig_offset, f"offset mismatch for {orig_offset}"
             assert extra == orig_extra, f"extra mismatch for {orig_extra}"
+
+    def test_bit_layout_x86_64(self, stack_depot_resolver):
+        """x86_64 (PAGE_SHIFT=12) 비트 레이아웃 검증."""
+        layout = stack_depot_resolver._get_bit_layout()
+
+        # PAGE_SHIFT=12 기준
+        assert layout["page_shift"] == 12
+        # DEPOT_OFFSET_BITS = 2 + 12 - 4 = 10
+        assert layout["offset_bits"] == 10
+        # DEPOT_POOL_INDEX_BITS = 32 - 10 - 5 = 17
+        assert layout["pool_index_bits"] == 17
+        # STACK_DEPOT_EXTRA_BITS = 5
+        assert layout["extra_bits"] == 5
