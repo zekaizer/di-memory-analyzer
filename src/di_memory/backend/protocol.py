@@ -147,6 +147,31 @@ class DIBackend(Protocol):
         """
         ...
 
+    def read_pointer(self, addr: int | str) -> int:
+        """
+        아키텍처에 따라 포인터 읽기 (32bit: 4바이트, 64bit: 8바이트).
+
+        Args:
+            addr: 메모리 주소 (int) 또는 심볼 이름 (str)
+
+        Returns:
+            포인터 값
+        """
+        ...
+
+    def read_string(self, addr: int | str, max_len: int = 256) -> str:
+        """
+        null-terminated 문자열 읽기.
+
+        Args:
+            addr: 메모리 주소 (int) 또는 심볼 이름 (str)
+            max_len: 최대 읽을 길이
+
+        Returns:
+            디코딩된 문자열
+        """
+        ...
+
     # =========================================================================
     # Symbol
     # =========================================================================
@@ -232,5 +257,40 @@ class DIBackend(Protocol):
 
         Returns:
             가상 주소
+        """
+        ...
+
+    # =========================================================================
+    # Per-CPU
+    # =========================================================================
+
+    def per_cpu(self, symbol: str, cpu_id: int) -> int:
+        """
+        per-cpu 변수의 특정 CPU 인스턴스 주소 반환.
+
+        Args:
+            symbol: per-cpu 심볼 이름
+            cpu_id: CPU 번호
+
+        Returns:
+            해당 CPU의 변수 주소
+        """
+        ...
+
+    # =========================================================================
+    # Container
+    # =========================================================================
+
+    def container_of(self, addr: int, struct_name: str, member: str) -> int:
+        """
+        멤버 주소에서 구조체 시작 주소 계산.
+
+        Args:
+            addr: 멤버의 주소
+            struct_name: 구조체 이름
+            member: 멤버 이름
+
+        Returns:
+            구조체 시작 주소
         """
         ...
