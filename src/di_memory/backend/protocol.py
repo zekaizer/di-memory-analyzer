@@ -163,15 +163,16 @@ class DIBackend(Protocol):
         """
         ...
 
-    def addr_to_symbol(self, addr: int) -> str | None:
+    def addr_to_symbol(self, addr: int) -> tuple[str, int] | None:
         """
-        주소를 심볼 이름으로 변환.
+        주소를 가장 가까운 심볼과 오프셋으로 변환.
 
         Args:
             addr: 메모리 주소
 
         Returns:
-            심볼 이름 또는 None (심볼이 없는 경우)
+            (심볼 이름, 오프셋) tuple 또는 None (심볼이 없는 경우)
+            예: ("kmem_cache_alloc", 0x42)
         """
         ...
 
@@ -191,7 +192,7 @@ class DIBackend(Protocol):
     # Kernel Config
     # =========================================================================
 
-    def is_config_enabled(self, config_name: str) -> str | None:
+    def is_config_enabled(self, config_name: str) -> bool | int | str | None:
         """
         커널 config 확인.
 
@@ -199,7 +200,10 @@ class DIBackend(Protocol):
             config_name: config 이름 (예: "CONFIG_SLUB_DEBUG")
 
         Returns:
-            config 값 (예: "y", "m", 숫자 등) 또는 None (config가 없는 경우)
+            config 값 또는 None (config가 없는 경우)
+            - bool: y -> True, n -> False
+            - int: 숫자 값
+            - str: 문자열 값
         """
         ...
 
