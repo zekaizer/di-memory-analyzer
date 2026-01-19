@@ -217,9 +217,9 @@ class DIBackend(Protocol):
     # Kernel Config
     # =========================================================================
 
-    def is_config_enabled(self, config_name: str) -> bool | int | str | None:
+    def get_config(self, config_name: str) -> bool | int | str | None:
         """
-        커널 config 확인.
+        커널 config 값 조회.
 
         Args:
             config_name: config 이름 (예: "CONFIG_SLUB_DEBUG")
