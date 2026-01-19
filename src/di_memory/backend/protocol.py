@@ -73,16 +73,19 @@ class DIBackend(Protocol):
     # Memory 읽기
     # =========================================================================
 
-    def read_struct(self, addr: int | str, struct_name: str) -> ctypes.Structure:
+    def read_type(
+        self, addr: int | str, type_name: str | None = None
+    ) -> ctypes.Structure | int:
         """
-        메모리에서 구조체를 읽어 반환.
+        메모리에서 타입 데이터를 읽어 반환.
 
         Args:
             addr: 메모리 주소 (int) 또는 심볼 이름 (str)
-            struct_name: 구조체 이름
+            type_name: 타입 이름 (예: "struct kmem_cache", "int")
+                       addr이 심볼(str)인 경우 생략 가능 (심볼에서 타입 추론)
 
         Returns:
-            ctypes.Structure 인스턴스
+            struct인 경우 ctypes.Structure, 기본 타입인 경우 int
         """
         ...
 
